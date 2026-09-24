@@ -348,3 +348,17 @@ def test_adds_extra_environment_from_packaged_template() -> None:
     assert merged["security"]["allowed_environment"] == ["PATH", "HOME"]  # untouched
     assert merged["security"]["strict_isolation"] is True  # untouched
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION
+
+
+def test_v41_adds_repo_governance_paths_from_packaged_template() -> None:
+    # A repository keeping its rules outside `.agents/rules/**` got a governance notice covering
+    # part of them and silently omitting the rest, with no key to say where the others live. An
+    # existing config picks the key up at its default, which is exactly today's behavior.
+    template = packaged_template_mapping()
+    operator = {"schema_version": 40, "repo": {"branch_prefix": "feat", "base_branch": "trunk"}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["repo"]["governance_paths"] == []
+    assert merged["repo"]["branch_prefix"] == "feat"  # operator values untouched
+    assert merged["repo"]["base_branch"] == "trunk"
+    assert merged["schema_version"] == CONFIG_SCHEMA_VERSION == 41
+    assert "repo.governance_paths" in added

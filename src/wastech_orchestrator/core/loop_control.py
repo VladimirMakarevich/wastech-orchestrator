@@ -82,6 +82,27 @@ def record_rework(run_state: FlowRunState) -> int:
     return run_state.bump(run_state.GLOBAL_FIX_KEY)
 
 
+def declared_loop_budget(snapshot: FlowSnapshot, node_id: str) -> int | None:
+    """The largest fix budget the flow declares for a rework/fail edge leaving ``node_id``.
+
+    A named loop reads its number from the flow's ``budgets`` map, an inline ``budget: N`` carries
+    its own, and both are the same statement: how many fix rounds this gate is worth. The largest
+    wins, so a node anchoring two loops is bounded by the more generous of them rather than by the
+    stricter one an unrelated edge happens to declare. ``None`` when the node anchors no rework edge
+    or none of them names a number — there is no plan to defer to, and the caller keeps its own
+    limit. Shared with the authoring-time lint so the warning and the runtime limit can never quote
+    two different numbers.
+    """
+    declared = []
+    for edge in snapshot.adjacency.get(node_id, ()):
+        if edge.outcome not in REWORK_OUTCOMES:
+            continue
+        budget = snapshot.doc.budgets.get(edge.loop) if edge.loop is not None else edge.budget
+        if budget is not None:
+            declared.append(budget)
+    return max(declared) if declared else None
+
+
 def loop_cap(budgets: Mapping[str, int], max_fix_cycles: int, loop: str) -> int:
     """The effective cap for a named loop: ``min(flow-declared budget, config ceiling)``."""
     return min(budgets.get(loop, _LARGE), max_fix_cycles)

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
+from wastech_orchestrator.core.cost_gap import cost_gaps, gap_json
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.nodes.base import GitPort, RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_artifact
@@ -801,7 +802,6 @@ class Supervisor:
                 flow_name=self._flow_name,
                 evaluations=evaluations,
                 artifacts_root=self._artifacts_root,
-                exchange_root=self._exchange_root,
                 repo_dir=self._repo_dir,
                 material_observations=self._finalize_digest(evaluations),
             )
@@ -1320,9 +1320,14 @@ class Supervisor:
                 "in the context below — it is the deterministic record of this run (the changed "
                 "paths and diff stat with a pointer to the full diff, every executed step with its "
                 "outcome and what it reported, the checks that ran, and your own recorded per-step "
-                "observations) — and ground every statement you make in it. Open the artifacts it "
-                "points at when you need more detail than it carries. If something is absent from "
-                "the packet, say so plainly rather than inferring it.\n"
+                "observations) — and ground every statement you make in it. A step carries what "
+                "its node reported inline: a tool gate's `data` and `stdout_head` are its own "
+                "measurements, and a `findings` value is the verdict that evaluator recorded on "
+                "that pass, so describe a gate from its own step rather than from a neighbouring "
+                "one. A field marked with a trailing `…` was cut at this packet's size bound — say "
+                "so rather than completing it. A step carrying a `note` is telling you how to read "
+                "it; follow it and do not report the note itself as an event. If something is "
+                "absent from the packet, say so plainly rather than inferring it.\n"
             )
         if with_follow_ups:
             prompt += (
@@ -1450,9 +1455,11 @@ class Supervisor:
         if not summary_text and self._existing_summary_nonempty(path):
             return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
-        usage = self._supervisor_usage(task_id)
+        usage, gaps = self._spend_report(task_id)
         if usage is not None:
             payload["supervisor_usage"] = usage
+        if gaps:
+            payload["cost_not_accounted"] = gaps
         if follow_ups:
             payload["follow_ups"] = [follow_up_json(fu) for fu in follow_ups]
         try:
@@ -1464,19 +1471,25 @@ class Supervisor:
             return
         self._register(task_id, "summary_json", str(path))
 
-    def _supervisor_usage(self, task_id: str) -> dict[str, Any] | None:
-        """This layer's own spend for the task, or ``None`` when it made no provider calls.
+    def _spend_report(self, task_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """This layer's own spend, and what the task's cost figures do not account for.
+
+        Both from one read of the attempt rows, because the second qualifies the first: the cost in
+        the usage report is summed from a column one shipped provider never fills, so a run that
+        used it reports a partial total and must say so rather than let it read as the whole bill.
+        ``(None, [])`` when the layer made no provider calls and nothing is unpriced.
 
         Best-effort like the rest of the layer: a store error costs the report, never the summary.
         """
         try:
-            return summarize_spend(self._store.get_provider_attempts_for_task(task_id))
+            attempts = self._store.get_provider_attempts_for_task(task_id)
         except Exception as exc:
             _LOG.warning(
                 "supervisor usage report could not be built (advisory, ignored)",
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
             )
-            return None
+            return None, []
+        return summarize_spend(attempts), gap_json(cost_gaps(attempts))
 
     @staticmethod
     def _existing_summary_nonempty(path: Path) -> bool:

@@ -23,7 +23,7 @@ The reference is split by concern, so a page you open to answer one question is 
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `39` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `41` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -45,6 +45,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | `repo.branch_prefix` | string | `"worc"` | — | Task branch naming: `worc/<task-id>-<slug>`. Leave default unless the project mandates another prefix. |
 | `repo.branch_mode` | `new` \| `existing` \| `current` | `new` | — | Instance default for where task git ops point (a per-task `branch_mode` overrides it). `new` = fork a fresh branch from base (the only mode where destructive git ops run); `existing` = a named pre-existing branch; `current` = the working-tree branch as-is (no create/switch/clean-check). |
 | `repo.checkout_base_on_cleanup` | bool \| null (tri-state) | `null` | — | Whether terminal cleanup returns the tree to `base_branch`. `null` = defer to `branch_mode` (`new` returns; `existing`/`current` stay); `false` = never return (global off, incl. `new`); `true` = force `new`+`existing` to return. `current` always stays. |
+| `repo.governance_paths` | list of repo-relative globs | `[]` | **Additive only.** Refused at load: a leading `!`, an absolute path, a `~`, a `..` traversal. | Where **this** repository keeps its rules, added to the set worc always reports on — `.agents/rules/**` plus root `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md`. A task whose diff touches one of them gets a notice in the log, the pull-request summary, the ledger and Telegram; never a block. Set it when your rules live somewhere else (`.rules/**`, `docs/conventions/**`) — otherwise half a governance edit ships unannounced. It can only widen: the key has no syntax for an exclusion, so no configuration can shrink the built-in set or turn the notice off. |
 
 ## `paths` — where the task lifecycle lives
 
@@ -61,9 +62,15 @@ The reference is split by concern, so a page you open to answer one question is 
 | `git.auto_merge` | bool | `false` | **DANGER — bypasses the human review gate.** `true` merges every published PR to `pr_base`. A per-task `auto_merge` wins outright over this. Enable only with protected branches + required CI already enforcing your bar. |
 | `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. For `merge`/`squash` the orchestrator writes the commit message itself — subject `feat(<task-id>): <title> (#N)`, empty body — rather than letting your repository's squash settings take the PR title and concatenate the branch's commits (which would drop the Conventional Commits type and carry the private audit-trail commit into your base branch). `worc merge-task --dry-run` prints it. |
 | `git.auto_merge_wait_for_checks` | bool | `false` | `true` arms GitHub-native auto-merge (`--auto`) — merge only after required checks pass. |
-| `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
+| `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. Its nodes are handed the conflict inventory as `{conflicts_path}`, and the merge is refused (nothing committed, the pull request left open) unless every conflicted path shows a decision in the working tree — see below. |
 | `git.footprint.audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). Inert while the lifecycle tree is gitignored — `install`'s default — because then there is no audit commit at all. |
 | `git.footprint.audit_on_branch` | `task` \| `sibling` | `task` | `task` = audit commit on the same branch as the code; `sibling` = on `<branch>-audit`. |
+
+### When a conflicted merge is refused
+
+`worc merge-task` aborts the merge and stops for you — nothing committed, nothing pushed, the pull request still open — when a conflicted path comes back from the merge flow byte-identical to what the merge left there. Conflict markers are only one shape of conflict: where one side deleted a file the other changed, or both sides added a binary, Git drops one side into the working tree with no marker in it, so "keep what is there" and "nobody looked at it" leave the same tree. The orchestrator refuses both rather than committing a decision nobody made, and names the exact paths.
+
+Two consequences worth knowing. A resolution whose correct answer really is "keep our side, unchanged" is refused too — finish that path by hand (merge the base in, resolve, commit) and re-run `merge-task`, which then takes the clean path. And a check command that rewrites files (a formatter, a code generator) moves the bytes of every path it touches, so it can satisfy the gate on a path the agent never considered; the gate's claim is that the bytes moved, not that an agent moved them.
 
 ### When the task branch already exists on the remote
 

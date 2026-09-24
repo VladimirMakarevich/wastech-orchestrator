@@ -145,19 +145,22 @@ def _engine(
     facts: dict[str, bool] | None = None,
     agents: AgentsConfig | None = None,
     diff_fingerprint: Callable[[], str] | None = None,  # EXPERIMENTAL(no-work-infra)
+    repeated_findings: Callable[[str], int] | None = None,
     is_cancelled: Callable[[], bool] = lambda: False,
+    run_state: FlowRunState | None = None,
 ) -> FlowEngine:
     facts = facts or {}
     registry = dict.fromkeys(("agent", "evaluator", "checks", "hitl", "publish"), runner)
     return FlowEngine(
         snapshot,
-        FlowRunState(flow_fingerprint=snapshot.flow_fingerprint),
+        run_state or FlowRunState(flow_fingerprint=snapshot.flow_fingerprint),
         registry,
         recorder,
         facts=lambda fact: facts.get(fact, False),
         agents=agents or _agents(),
         task_id="task-1",
         diff_fingerprint=diff_fingerprint,
+        repeated_findings=repeated_findings,
         is_cancelled=is_cancelled,
     )
 
@@ -408,6 +411,90 @@ def test_engine_stall_guard_inert_without_fingerprint() -> None:
     result = _engine(_fix_loop_snapshot(), runner, recorder, agents=_agents(max_fix_cycles=2)).run()
     assert result.status is Status.MANUAL_ACTION_REQUIRED
     assert result.limit_name == "max_fix_cycles"
+
+
+class _AlwaysTheSameFindings:
+    """Stands in for the recorded verdicts of a node that keeps asking for the same thing.
+
+    The count lives outside the engine — as the real one does, derived from the ``evaluations`` rows
+    — which is the property under test: a new engine starts with empty in-memory guard state and
+    this answer is unchanged by that.
+    """
+
+    def __init__(self) -> None:
+        self.passes = 0
+
+    def __call__(self, node_id: str) -> int:
+        self.passes += 1
+        return self.passes
+
+
+def test_engine_aborts_a_loop_whose_verdict_never_changes() -> None:
+    # A critic asking for something that cannot be delivered costs a full provider turn per pass and
+    # can never converge, so the third identical verdict — the first that carries no new information
+    # — ends it, well before the (much larger) fix budget.
+    runner = StubRunner({"t": ["fail", "fail", "fail", "fail"]})
+    recorder = RecordingRecorder()
+
+    result = _engine(
+        _fix_loop_snapshot(), runner, recorder, repeated_findings=_AlwaysTheSameFindings()
+    ).run()
+
+    assert result.status is Status.MANUAL_ACTION_REQUIRED
+    assert result.stuck_loop == "test_fix"
+    # Which guard fired is the operator's next move: "the agent did nothing" and "the critic asked
+    # for the impossible" call for opposite responses, so the two names must not be one name.
+    assert result.limit_name == "repeated_findings"
+    assert recorder.failure_reports == [("t", "test_fix", "repeated_findings")]
+    assert runner.calls.count("t") == 3
+
+
+def test_the_repeated_verdict_guard_survives_a_restart() -> None:
+    # The whole reason for a derived signal. A restart gives the engine a fresh in-memory streak
+    # while the persisted loop counters beside it keep counting — so a guard that lived only in
+    # memory could never end a loop that restarts more often than it repeats.
+    verdicts = _AlwaysTheSameFindings()
+    snapshot = _fix_loop_snapshot()
+    run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+    before_restart = _engine(
+        snapshot,
+        StubRunner({"t": ["fail", "fail"]}),
+        RecordingRecorder(),
+        repeated_findings=verdicts,
+        is_cancelled=lambda: verdicts.passes >= 2,
+        run_state=run_state,
+    )
+    with pytest.raises(FlowCancelled):
+        before_restart.run()
+
+    recorder = RecordingRecorder()
+    result = _engine(
+        snapshot,
+        StubRunner({"t": ["fail"]}),
+        recorder,
+        repeated_findings=verdicts,
+        run_state=FlowRunState(
+            flow_fingerprint=snapshot.flow_fingerprint,
+            current_node=run_state.current_node,
+            loop_counters=dict(run_state.loop_counters),
+        ),
+    ).run()
+
+    assert result.status is Status.MANUAL_ACTION_REQUIRED
+    assert result.limit_name == "repeated_findings"  # the third pass, counted across the boundary
+
+
+def test_a_loop_whose_verdict_changes_is_not_aborted_by_the_repeated_verdict_guard() -> None:
+    # A critic that finds something new each pass is a working loop, however long it runs: only a
+    # run of identical verdicts is evidence that nothing more can come of it.
+    runner = StubRunner({"t": ["fail", "fail", "pass"]})
+    recorder = RecordingRecorder()
+
+    engine = _engine(_fix_loop_snapshot(), runner, recorder, repeated_findings=lambda _node: 1)
+    result = engine.run()
+
+    assert result.status is Status.DONE
+    assert recorder.failure_reports == []
 
 
 def test_engine_global_cap_is_hard_stop() -> None:

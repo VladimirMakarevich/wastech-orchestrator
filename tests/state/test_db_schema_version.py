@@ -153,3 +153,81 @@ def test_the_pushed_sha_column_is_added_to_a_pre_versioning_database(tmp_path: P
     finally:
         store.close()
     assert _user_version(db) == DB_SCHEMA_VERSION
+
+
+def test_the_model_columns_are_added_to_a_pre_versioning_database(tmp_path: Path) -> None:
+    # P1.6 is additive on `provider_attempts`, so the one database `_migrate` may reshape — a
+    # `0`-stamped, pre-versioning one — gains `model`/`reasoning` and keeps the attempt rows it
+    # had. Greenfield: nothing is backfilled, so an old row reads NULL, which is the truth about
+    # it. Idempotent — a second open must not attempt the ALTER again.
+    db = tmp_path / "prev.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE provider_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "node_run_id INTEGER, provider TEXT NOT NULL, attempt INTEGER NOT NULL, status TEXT, "
+        "error_class TEXT, exit_code INTEGER, attempt_dir TEXT, started_at TEXT, finished_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO provider_attempts (node_run_id, provider, attempt, status) VALUES (?,?,?,?)",
+        (1, "codex", 1, "succeeded"),
+    )
+    conn.commit()
+    conn.close()
+    assert _user_version(db) == 0
+
+    StateStore.open(db).close()  # first open migrates
+    store = StateStore.open(db)  # second open must be a no-op, not a duplicate ALTER
+    try:
+        columns = {
+            str(row[1]) for row in store._conn.execute("PRAGMA table_info(provider_attempts)")
+        }
+        assert {"model", "reasoning"} <= columns
+        row = store._conn.execute(
+            "SELECT provider, model, reasoning FROM provider_attempts"
+        ).fetchone()
+        assert row["provider"] == "codex"  # the pre-existing attempt row survived
+        assert row["model"] is None and row["reasoning"] is None  # not backfilled, not guessed
+    finally:
+        store.close()
+    assert _user_version(db) == DB_SCHEMA_VERSION
+
+
+def test_the_abort_reason_column_is_added_to_a_pre_versioning_database(tmp_path: Path) -> None:
+    # P2.15 is additive on `node_runs`: a `0`-stamped, pre-versioning database gains
+    # `abort_reason` and keeps the rows it had. Greenfield, so an old row written while the two
+    # meanings shared `skip_reason` is left exactly as it was rather than reinterpreted.
+    db = tmp_path / "prev.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE node_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, "
+        "node_id TEXT NOT NULL, node_kind TEXT NOT NULL, status TEXT, skipped INTEGER NOT NULL "
+        "DEFAULT 0, skip_reason TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO node_runs (task_id, node_id, node_kind, status, skipped, skip_reason) "
+        "VALUES (?,?,?,?,?,?)",
+        ("task-001", "fidelity_critic", "evaluator", "succeeded", 0, "exchange mutated"),
+    )
+    conn.commit()
+    conn.close()
+    assert _user_version(db) == 0
+
+    StateStore.open(db).close()  # first open migrates
+    store = StateStore.open(db)  # second open must be a no-op, not a duplicate ALTER
+    try:
+        columns = {str(row[1]) for row in store._conn.execute("PRAGMA table_info(node_runs)")}
+        assert "abort_reason" in columns
+        row = store._conn.execute("SELECT skip_reason, abort_reason FROM node_runs").fetchone()
+        assert row["skip_reason"] == "exchange mutated"  # the old row is left as it was
+        assert row["abort_reason"] is None  # nothing is inferred or moved
+    finally:
+        store.close()
+    assert _user_version(db) == DB_SCHEMA_VERSION

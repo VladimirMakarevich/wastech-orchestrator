@@ -103,18 +103,38 @@ def test_reconcile_open_node_runs_closes_orphans(tmp_path: Path) -> None:
         "t1",
         finished_at="2026-01-01T00:05:00+00:00",
         error_class="cancelled",
-        skip_reason="killed by operator",
+        abort_reason="killed by operator",
     )
     assert [r.id for r in closed] == [orphan]
     assert closed[0].route_primary == "codex"
     by_id = {r.id: r for r in store.get_node_runs("t1")}
     assert by_id[orphan].status == "aborted"
     assert by_id[orphan].finished_at == "2026-01-01T00:05:00+00:00"
-    assert by_id[orphan].skip_reason == "killed by operator"
+    assert by_id[orphan].abort_reason == "killed by operator"
+    # The column named for skips stays empty: this run was interrupted, not skipped. Overloading
+    # it is what produced a row reading skipped=0 / succeeded / "exchange mutated during a
+    # provider attempt", which no reader could resolve.
+    assert by_id[orphan].skip_reason is None
+    assert by_id[orphan].skipped is False
     assert by_id[orphan].error_class == "cancelled"
     # The already-finalized node is untouched (only 'running'/finished_at NULL rows are closed).
     assert by_id[done].status == "succeeded"
     assert by_id[done].finished_at == "2026-01-01T00:00:30+00:00"
+
+
+def test_no_row_carries_a_skip_reason_without_being_skipped(tmp_path: Path) -> None:
+    # The invariant the split buys: skip_reason is set only together with skipped=1, on the
+    # ``when``-false rows that really are skips. Asserted over every row a run can produce.
+    store = _store(tmp_path)
+    store.record_node_skip("t1", "docs", "agent", reason="when: docs_required is false")
+    orphan = store.record_node_run(
+        NodeRunRow(task_id="t1", node_id="impl", node_kind="agent", status="running")
+    )
+    store.reconcile_open_node_runs("t1", finished_at="t-end", abort_reason="killed by operator")
+    rows = store.get_node_runs("t1")
+    assert [(r.skipped, r.skip_reason is None) for r in rows] == [(True, False), (False, True)]
+    aborted = next(r for r in rows if r.id == orphan)
+    assert aborted.abort_reason == "killed by operator"
 
 
 def test_reconcile_open_node_runs_noop_when_all_finished(tmp_path: Path) -> None:

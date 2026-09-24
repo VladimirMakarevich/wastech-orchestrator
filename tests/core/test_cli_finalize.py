@@ -217,7 +217,9 @@ def test_finalize_reconciles_orphan_node_runs(git_repo, tmp_path: Path) -> None:
     assert runs[orphan].status == "aborted"
     assert runs[orphan].finished_at is not None
     assert runs[orphan].error_class == "cancelled"
-    assert runs[orphan].skip_reason  # names the finalize action
+    assert runs[orphan].abort_reason  # names the finalize action
+    # Not in ``skip_reason``: this node was interrupted, not skipped by a ``when``.
+    assert runs[orphan].skip_reason is None
     # The killed attempt is on the ledger — provider from route_primary, usage marked 'unknown'.
     aborted = [a for a in attempts if a.node_run_id == orphan]
     assert len(aborted) == 1

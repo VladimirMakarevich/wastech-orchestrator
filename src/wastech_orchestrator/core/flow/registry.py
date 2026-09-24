@@ -42,6 +42,7 @@ from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
     lint_prompt_variables,
+    lint_tool_loop_budgets,
     validate_flow,
     validate_flow_against_config,
 )
@@ -147,8 +148,13 @@ class FlowRegistry:
                 results.append(FlowCheck(name=name, error=str(exc), warnings=()))
                 continue
             warnings = tuple(
-                f"{w.role_file} references unknown {{{w.token}}}"
+                f"{w.role_file} references unknown {{{w.token}}} (renders verbatim to the agent)"
                 for w in lint_prompt_variables(snap)
+            ) + tuple(
+                f"node {w.node_id!r}: the declared fix budget of {w.budget} holds as written "
+                "only while the tool emits a top-level 'findings' array; without one it is the "
+                "number of identical failures that ends the loop, not the fix rounds it plans"
+                for w in lint_tool_loop_budgets(snap)
             )
             results.append(FlowCheck(name=name, error=None, warnings=warnings))
         return results

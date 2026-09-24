@@ -20,12 +20,21 @@ Where to find the design detail:
 
 ## Open backlog
 
+### Defects
+
+Reproduced failures in shipped behavior, as distinct from unbuilt features. An item leaves this table the same way any other does — when it lands, the code and its tests become the record.
+
+| Item | Summary | Source / constraint |
+| --- | --- | --- |
+| [`merge-task` never reaches the merge flow on a conflict](merge-task-exchange-containment.md) | **Fixed 2026-09-16**, kept here until the follow-up work beside it lands. `worc merge-task` aborted before the `conflict_resolution` node's first provider call whenever the base-merge conflicted — the only case the merge flow exists for. `_run_merge_flow` publishes no task packet, so `build_node_inputs` left `task_path` pointing at the live `tasks/<state>/<id>.md` and containment rejected the request. Cleared with `inputs.task_path = None`; the node-layer manual class now converts at the merge seam instead of reaching the CLI as a traceback. | The test that should have caught it existed and passed: its fixture seeded a `TaskRow` with no `source_path`, and containment skips falsy values. The fixture now carries the lifecycle path. What the fix uncovered next — a marker-less conflict committed silently — is fixed too; what remains open is [merge-flow-conflict-competence.md](merge-flow-conflict-competence.md). |
+
 ### Other deferred features
 
 These are deferred by the v1 spec or described in architecture notes; not scheduled.
 
 | Item | Summary | Source / constraint |
 | --- | --- | --- |
+| [The merge flow resolves conflicts blind](merge-flow-conflict-competence.md) | `worc merge-task` now runs and can no longer commit a conflict nobody decided, but it does not yet meet the promise it was built on — that the orchestrator, having written the pull requests, can resolve **any** conflict between them. The merge agent knows what conflicted and nothing else: no task packet (so no acceptance criteria, no plan, no PR body), no read access to either side's history (the role prompt bans `git` wholesale, read verbs included), no inheritance of the session that wrote the code (`lineage_affinity` may not cross flows), and no channel to declare a resolution the working tree cannot express — which is the one honest false refusal the new gate has. Eight items with their constraints. | Items 1 and 2 (task packet, declared resolutions) are one design conversation, not two: both are "what the merge agent hears and says". The mutation ban is not negotiable in any of them — only the orchestrator commits, pushes, opens and merges pull requests. Found while merging four orchestrator-authored PRs in a real repository. |
 | Install and upgrade flow | Fix the git-tag install/upgrade friction found on `v0.8.6a3`: `pipx upgrade` never advances a pinned git ref, `pipx install --force` fails on the uv backend, and the `[shell]` extra needs quoted PEP 508 form. Phased path: document the correct git recipe now → publish to PyPI (real fix) → optional `worc self-update`. | Greenfield (no migration); credentials stay outside the orchestrator; cross-platform quoting (zsh/bash/PowerShell). From `wastech-mdlint` testing. |
 | Runtime provider capacity gate | Before autonomous `watch` claims a pending task, query the capacity of the Codex/Claude accounts its resolved routes need and defer the task when configured headroom is unavailable. | Runtime admission control, not install preflight. Deferred tasks stay pending, consume no attempts, retried after provider reset. **Stays deferred**: the reactive slice — honor a reset instant the provider already reported — shipped with the provider-exhaustion hardening on 2026-08-06; this item is the proactive half. |
 | Codex-controlled provider home | Run autonomous Codex from an orchestrator-controlled `CODEX_HOME` — auth, session and config isolated by construction — instead of layer-isolating the operator's own home directory. | Split out of the read-isolation work as deferred hardening; requires an explicit one-time operator `codex login` against that home, so it cannot ship silently. |

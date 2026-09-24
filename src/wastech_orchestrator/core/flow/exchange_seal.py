@@ -40,6 +40,7 @@ and bounded/observable retries plus a read-only-attribute clear for Windows shar
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import stat
@@ -66,6 +67,8 @@ from wastech_orchestrator.runtime_layout import (
     EXCHANGE_SEAL_DIRNAME,
     runs_root,
 )
+
+_LOG = logging.getLogger(__name__)
 
 #: Bump when the on-disk snapshot layout / manifest schema changes (an older snapshot then fails to
 #: verify and continue is refused — fresh/restart required).
@@ -504,16 +507,36 @@ def quarantine_contaminated(
     *,
     expected: ExchangeManifest | None,
     observed_changes: tuple[str, ...],
-) -> Path:
+    created_at: str,
+    node_id: str | None,
+    attempt: int | None,
+) -> Path | None:
     """Move a mutation-flagged exchange tree to private contaminated evidence; never seal/restore.
 
     The active tree is relocated wholesale (a same-filesystem rename — the tree is agent-mutated and
     may contain planted links, so it is never walked/copied by following contents). The parent-held
-    expected manifest and the observed change list are recorded alongside it. Returns the evidence
-    directory. A cross-volume relocation that cannot rename raises :class:`ExchangeCleanupBlocked`,
-    the caller marks the task unsafe (the contaminated tree stays put, later launches are blocked).
+    expected manifest and the observed change list are recorded alongside it, with ``created_at``,
+    the node that detected the mutation and the task attempt it happened on — so two bundles order
+    and attribute themselves from their own contents rather than from directory mtime. Returns the
+    evidence directory. A cross-volume relocation that cannot rename raises
+    :class:`ExchangeCleanupBlocked`, the caller marks the task unsafe (the contaminated tree stays
+    put, later launches are blocked).
+
+    ``None``, with a ``WARNING`` and nothing created, when there is nothing to record: no expected
+    manifest, no observed changes and no live tree. That combination is reachable — a second
+    terminal of a task whose stored contamination flag is still set and whose tree already moved
+    into the first bundle — and it used to mint a directory holding a contentless ``evidence.json``,
+    in the one private root :mod:`~wastech_orchestrator.runs_retention` correctly never reclaims.
     """
     task_dir = Path(exchange_task_dir(exchange_root, task_id))
+    live_tree = os.path.lexists(task_dir)
+    if expected is None and not observed_changes and not live_tree:
+        _LOG.warning(
+            "contaminated exchange not quarantined: nothing to record (no expected manifest, no "
+            "observed changes, no live tree) — the evidence of this incident is an earlier bundle",
+            extra={"task_id": task_id},
+        )
+        return None
     quarantine_root = exchange_quarantine_root(private_home, task_id)
     quarantine_root.mkdir(parents=True, exist_ok=True)
     index = _next_index(quarantine_root, "")
@@ -525,8 +548,11 @@ def quarantine_contaminated(
         expected=expected,
         observed_changes=observed_changes,
         task_id=task_id,
+        created_at=created_at,
+        node_id=node_id,
+        attempt=attempt,
     )
-    if os.path.lexists(task_dir):
+    if live_tree:
         dest = assert_contained_path(evidence, Path(evidence) / "tree")
         try:
             task_dir.replace(dest)
@@ -543,11 +569,22 @@ def _write_evidence(
     expected: ExchangeManifest | None,
     observed_changes: tuple[str, ...],
     task_id: str,
+    created_at: str,
+    node_id: str | None,
+    attempt: int | None,
 ) -> None:
-    """Record the parent-held expected manifest and the observed change list beside the evidence."""
+    """Record the parent-held expected manifest and the observed change list beside the evidence.
+
+    ``node_id`` / ``attempt`` are nullable because NULL is their real meaning: a bundle written at a
+    terminal that only carries a stored contamination flag knows the task, not the node run that
+    set it.
+    """
     doc = {
         "format": _SEAL_FORMAT,
         "task_id": task_id,
+        "created_at": created_at,
+        "node_id": node_id,
+        "attempt": attempt,
         "expected_manifest": (
             None
             if expected is None

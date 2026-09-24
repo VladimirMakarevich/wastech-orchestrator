@@ -216,21 +216,99 @@ def ensure_own_process_group(
     return True
 
 
+class ExecutorBusyError(RuntimeError):
+    """An exclusive :func:`write_pid_file` found the marker held by a live process.
+
+    Carries the holder's PID so the caller can name it: this module never prints, so the refusal
+    wording belongs to the CLI while the identity of the winner belongs here.
+    """
+
+    def __init__(self, pid: int, path: Path) -> None:
+        super().__init__(f"{path.name} is held by a live process (pid {pid})")
+        self.pid = pid
+        self.path = path
+
+
+def _marker_payload(pid: int, start_time_fn: StartTimeFn) -> str:
+    """The marker's on-disk bytes for ``pid`` — one line of JSON, LF on every platform.
+
+    Both write paths render it through here so a reclaimed marker is byte-identical to a freshly
+    claimed one; ``newline=""`` keeps that true on Windows, where text mode would turn the trailing
+    ``\n`` into ``\r\n`` on one path only.
+    """
+    return json.dumps({"pid": pid, "start_time": start_time_fn(pid)}) + "\n"
+
+
+def _create_exclusively(path: Path, payload: str) -> bool:
+    """Create ``path`` holding ``payload``, or return ``False`` because it already exists.
+
+    ``O_CREAT | O_EXCL`` is the one create the kernel serialises between processes on every platform
+    we target, so of two executors racing for the same clone exactly one wins here — which is what
+    turns the write into a claim instead of an overwrite.
+    """
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(payload)
+    return True
+
+
+def _replace_atomically(path: Path, payload: str) -> None:
+    """Put ``payload`` at ``path`` via a temp file in the same directory + :func:`os.replace`.
+
+    A concurrent ``stop`` reading the marker sees either the whole old record or the whole new one,
+    never a half-write.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(payload, encoding="utf-8", newline="")
+    tmp.replace(path)
+
+
 def write_pid_file(
-    path: Path, *, pid: int | None = None, start_time_fn: StartTimeFn = _read_proc_start_time
+    path: Path,
+    *,
+    pid: int | None = None,
+    start_time_fn: StartTimeFn = _read_proc_start_time,
+    exclusive: bool = False,
+    kill_fn: KillFn = os.kill,
+    can_signal: bool | None = None,
 ) -> None:
     """Atomically write the current (or given) PID + its start-time token to ``path``.
 
     The file is small JSON (``{"pid": ..., "start_time": ...}``); the start-time lets a later probe
     tell our daemon apart from an unrelated process that recycled the PID. Atomic via a temp file in
     the same directory + :func:`os.replace`, so a concurrent ``stop`` never observes a half-write.
+
+    ``exclusive`` makes the write a **claim** on the single executor slot rather than a recording of
+    it. A caller that first asks who owns the slot and then writes has two operations with real work
+    between them, and two processes that both find it free in that window both proceed — the loser's
+    marker silently replaced, after which ``stop`` addresses the wrong process and every audit row
+    interleaves. Claiming closes that window in the kernel: the marker is created with ``O_EXCL``,
+    and a collision is resolved by re-probing the recorded holder through :func:`running_daemon_pid`
+    — a live one raises :class:`ExecutorBusyError`, a stale one (dead, recycled, or unreadable) is
+    reclaimed. Reclaiming is not a convenience: without it a single crash would refuse every later
+    command in that clone forever.
+
+    Where liveness cannot be probed at all (Windows; see :func:`_can_signal`),
+    :func:`running_daemon_pid` answers from the marker's *presence*, so ``O_EXCL`` is the whole
+    guard there and any parseable record refuses the claim.
+
+    Raises :class:`ExecutorBusyError` when ``exclusive`` is set and a live holder is recorded.
     """
     pid = os.getpid() if pid is None else pid
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    payload = {"pid": pid, "start_time": start_time_fn(pid)}
-    tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    payload = _marker_payload(pid, start_time_fn)
+    if exclusive:
+        if _create_exclusively(path, payload):
+            return
+        holder = running_daemon_pid(
+            path, kill_fn=kill_fn, start_time_fn=start_time_fn, can_signal=can_signal
+        )
+        if holder is not None:
+            raise ExecutorBusyError(pid=holder, path=path)
+    _replace_atomically(path, payload)
 
 
 def read_pid_record(path: Path) -> ProcessIdentity | None:

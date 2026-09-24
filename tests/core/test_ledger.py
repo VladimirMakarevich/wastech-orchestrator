@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from wastech_orchestrator.core.orchestrator import _ledger_attempt_count
 from wastech_orchestrator.ledger import (
     COMPLETED_FILENAME,
     INFRA_LOOP,
@@ -200,10 +201,63 @@ def test_write_failure_report(tmp_path: Path) -> None:
     stuck = Path(stuck_path).read_text(encoding="utf-8")
     assert "review" in stuck
     assert "max_total_fix_iterations" in stuck
-    # A fix-loop terminal spent a budget, not a provider: its artifact carries no attempt evidence
-    # and gains no orphan heading, so the machine key is present-but-empty rather than absent.
+    # A caller that passes no failing-node evidence gets no attempt heading, so the machine key is
+    # present-but-empty rather than absent.
     assert data["provider_attempts"] == []
     assert "## Provider attempts" not in stuck
+
+
+def test_stuck_findings_render_as_markdown_not_a_python_repr(tmp_path: Path) -> None:
+    # P2.15: the evaluator's own keys are severity/reason/paths/gating/fix — never ``title`` — so
+    # the old ``f.get('title', f)`` fell through to the mapping and printed Python syntax into a
+    # document written for a human or a handoff agent.
+    _report, stuck_path = write_failure_report(
+        tmp_path,
+        "task-003",
+        loop="review",
+        limit_name="repeated_findings",
+        counters={"review_fix_cycles": 3},
+        last_check_log=None,
+        last_review_findings=[
+            {
+                "severity": "low",
+                "reason": "the page exceeds the hard maximum",
+                "paths": ["content/1a.1.2_en.md"],
+                "gating": True,
+                "fix": "cut the closing paragraph",
+            },
+            {"severity": "high", "reason": "no acceptance criterion covers this", "gating": False},
+        ],
+        final_diff="",
+    )
+    stuck = Path(stuck_path).read_text(encoding="utf-8")
+    assert "- **low** · gating — the page exceeds the hard maximum" in stuck
+    assert "  - paths: `content/1a.1.2_en.md`" in stuck
+    assert "  - proposed fix: cut the closing paragraph" in stuck
+    assert "- **high** · non-gating — no acceptance criterion covers this" in stuck
+    # Nothing of the repr survives: no quoted keys, no capitalised Python booleans.
+    assert "'severity'" not in stuck and "True" not in stuck and "{" not in stuck
+
+
+def test_stuck_report_says_why_a_tool_node_has_no_check_log(tmp_path: Path) -> None:
+    # A bare ``null`` reads as "we looked and found nothing"; the truth is that tool nodes never
+    # write ``check_runs`` at all, and their output is somewhere else.
+    note = "no check log: 'form_gate' is a tool node, and tool nodes do not write check runs"
+    report_path, stuck_path = write_failure_report(
+        tmp_path,
+        "task-004",
+        loop="review",
+        limit_name="repeated_findings",
+        counters={},
+        last_check_log=None,
+        last_review_findings=None,
+        final_diff="",
+        failing_node=NodeFailureEvidence(node_id="form_gate", check_log_note=note),
+    )
+    data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert data["last_check_log"] is None  # still null — the field means what it always meant
+    assert data["last_check_log_note"] == note
+    assert note in Path(stuck_path).read_text(encoding="utf-8")
 
 
 def test_write_failure_report_infra_names_every_attempt(tmp_path: Path) -> None:
@@ -268,3 +322,37 @@ def test_write_failure_report_decomposed(tmp_path: Path) -> None:
     data = json.loads(Path(report_path).read_text(encoding="utf-8"))
     assert data["decomposed"]["failing_subtask"] == 2
     assert data["decomposed"]["committed_shas"] == ["abc"]
+
+
+def test_attempt_numbers_are_dense_and_exclude_gate_refusals(tmp_path: Path) -> None:
+    """P2.15's ledger question, answered.
+
+    Re-checked after batch 1 landed: the gaps were never a race and did not disappear with it.
+    ``en-adapt-01a``'s ``1, 1, 1, 2, 5, 6, 7`` came from two different sources for one field — a
+    per-process map that nothing cleared (so every terminal reached without a rerun wrote 1, and
+    every terminal after a rerun reused that rerun's number) and a ledger count consulted minutes
+    earlier. Counting at the append makes the field mean one thing: this record's ordinal among
+    the id's terminals. A refusal that never became a task is not one of them.
+    """
+    ledger = Ledger(tmp_path)
+    ledger.append(
+        LedgerRecord(
+            id="t1",
+            title="rejected before it ever ran",
+            final_status="failed",
+            finished_at="t0",
+            validation_reason="injection_suspected",
+        )
+    )
+    assert _ledger_attempt_count(ledger, "t1") == 0  # a refusal is not an attempt
+
+    for n in range(1, 4):
+        assert _ledger_attempt_count(ledger, "t1") + 1 == n
+        ledger.append(
+            LedgerRecord(id="t1", title="T", final_status="failed", finished_at=f"t{n}", attempt=n)
+        )
+    assert [rec["attempt"] for rec in ledger.records() if rec["id"] == "t1"] == [1, 1, 2, 3]
+    # The refusal keeps its own default and is the only record that repeats a number; every
+    # terminal transition after it is numbered once, in order, with no gap.
+    terminals = [rec for rec in ledger.records() if not rec.get("validation_reason")]
+    assert [rec["attempt"] for rec in terminals] == [1, 2, 3]

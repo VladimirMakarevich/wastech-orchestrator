@@ -89,6 +89,26 @@ def test_governance_changed_paths_matches_agents_rules_tree_including_nested() -
     )
 
 
+def test_governance_changed_paths_adds_the_repositorys_own_rule_locations() -> None:
+    # The run that exposed this touched `AGENTS.md` and `.rules/wastime-journey-rules.md`; the
+    # ledger reported only the first, so half a governance edit reached the PR unannounced.
+    changed = ("AGENTS.md", ".rules/wastime-journey-rules.md", "src/app.py")
+    assert governance_changed_paths(changed) == ("AGENTS.md",)
+    assert governance_changed_paths(changed, extra_globs=(".rules/**",)) == (
+        ".rules/wastime-journey-rules.md",
+        "AGENTS.md",
+    )
+
+
+def test_governance_extra_globs_can_only_widen_the_set() -> None:
+    # The non-gateable guarantee: there is no value of the operator key that makes a floor path
+    # stop being reported — the two sets are unioned, never consulted against each other.
+    floor = (".agents/rules/security.md", "AGENTS.md")
+    expected = (".agents/rules/security.md", "AGENTS.md")  # sorted; both are floor hits
+    for extra in ((), (".rules/**",), ("!.agents/rules/**",), (".agents/rules/security.md",)):
+        assert governance_changed_paths(floor, extra_globs=extra) == expected
+
+
 def test_governance_changed_paths_ignores_ordinary_paths_empty_and_sorts() -> None:
     assert governance_changed_paths(()) == ()
     assert governance_changed_paths(("src/x.py", "README.md")) == ()
@@ -158,6 +178,31 @@ def test_load_returns_file_entries_for_resume(tmp_path: Path) -> None:
     # The task-packet digest recovered from the manifest is the sha256 of the frozen packet file.
     packet_digest = next(d for key, d in loaded.entries if key == TASK_PACKET_KEY)
     assert packet_digest == hashlib.sha256((bundle / TASK_PACKET_KEY).read_bytes()).hexdigest()
+
+
+def test_load_carries_the_freeze_instant_and_keeps_it_out_of_the_digest(tmp_path: Path) -> None:
+    # P2.11: a resume quotes the instant back to the operator, so the manifest has to carry it.
+    # Metadata, not an entry: a timestamp inside the composite identity would make every re-freeze
+    # a different bundle, and the digest is what a continue verifies.
+    bundle = tmp_path / "bundle"
+    bundle.mkdir(parents=True)
+    _, task_entry = freeze_task_packet(bundle, _write(tmp_path / "t.md", "task body\n"))
+    bare = write_instruction_manifest(bundle, entries=[task_entry], control_digest="ctrl")
+    stamped = write_instruction_manifest(
+        bundle,
+        entries=[task_entry],
+        control_digest="ctrl",
+        metadata={"frozen_at": "2026-09-16T00:52:00+00:00"},
+    )
+    assert stamped == bare  # metadata does not move the identity
+    assert load_instruction_bundle(bundle, stamped).frozen_at == "2026-09-16T00:52:00+00:00"
+
+
+def test_load_of_a_manifest_without_the_instant_says_nothing_rather_than_guessing(
+    tmp_path: Path,
+) -> None:
+    bundle, digest = _frozen_bundle(tmp_path)
+    assert load_instruction_bundle(bundle, digest).frozen_at is None
 
 
 def test_manifest_verify_rejects_wrong_parent_digest(tmp_path: Path) -> None:
