@@ -573,7 +573,8 @@ class LoggingConfig:
     posture, so an absent ``logging`` block is as quiet as the one ``install`` used to write out.
     ``artifacts`` (``minimal|standard|full``) governs which per-attempt provider files survive under
     ``logs/<task-id>/stages/.../<attempt>-<provider>/``: ``minimal`` keeps only ``result.json``
-    (even on failure — ``result.json`` records the exit code + error class), ``standard`` adds
+    and ``request.json`` (even on failure — ``result.json`` records the exit code + error class,
+    ``request.json`` the redacted argv + permission profile it ran under), ``standard`` adds
     ``stdout.log``/``stderr.log``, ``full`` keeps everything. Prompt-audit is independent (governed
     by ``prompt_audit``); ``rendered-prompt.md`` and task-level artifacts are out of scope.
 

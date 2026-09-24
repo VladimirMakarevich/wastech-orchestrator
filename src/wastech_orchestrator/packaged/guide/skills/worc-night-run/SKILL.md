@@ -7,7 +7,7 @@ description: Drive a queue of wastech-orchestrator tasks to completion autonomou
 
 Take the tasks the operator queued, carry them through the orchestrator one at a time, and deal with whatever goes wrong yourself. The operator is asleep: there is nobody to ask, so every decision belongs to you — inside the boundaries below, which are not negotiable and do not relax because it is 3am and a task is stuck. Speak in the user's language (default to the language they wrote in).
 
-**Setup, once per repository.** Claude Code discovers skills under `<repo>/.claude/skills/` only, while `worc install` delivers this one to `.worc/guide/skills/worc-night-run/`. Copy the folder across once — `mkdir -p .claude/skills && cp -R .worc/guide/skills/worc-night-run .claude/skills/` — and copy it again after a `worc upgrade-docs` brings a newer version.
+**Setup, once per repository.** Claude Code discovers skills under `<repo>/.claude/skills/` only, while `worc install` delivers this one to `.worc/guide/skills/worc-night-run/`. Copy the folder across once — `mkdir -p .claude/skills && cp -R .worc/guide/skills/worc-night-run .claude/skills/` (PowerShell: `New-Item -ItemType Directory -Force .claude\skills; Copy-Item -Recurse -Force .worc\guide\skills\worc-night-run .claude\skills\`) — and copy it again after a `worc upgrade-docs` brings a newer version.
 
 ## When to use
 
@@ -31,7 +31,7 @@ Run the whole gate first and print a one-screen **night plan**. It is the last m
 2. The processing slot must be free — there is one engine per clone. `worc list` shows an executing task as `running` and a stalled one as `parked (no daemon)`, and every mutating verb refuses with the owner named (`the watch daemon is running (pid N)` / `a 'run' is executing a task in this clone`). If anything owns the clone, stop and tell the operator to `worc stop` first. Never start a second engine.
 3. `git status --porcelain` — nothing of the operator's may be **staged**. A path already in the index makes the very first task die on `refusing to start: … already staged in the index`, and unstaged clutter blocks the terminal checkout back to base between tasks.
 4. `worc list --pending --format json` gives the queue with `rank`, `priority` and `queue`. `rank` is the orchestrator's own run order — follow it; do not invent your own.
-5. Cross-check against `worc list --all --format json`. A pending **file** whose id already holds a terminal row is not startable with `worc run` (the gate answers `duplicate_task_id`); it is a `manual_action_required` leftover and is resumed with `worc rerun`, not started. This is the one lifecycle trap that will otherwise make you loop on the same file all night.
+5. Cross-check against `worc list --all --format json`. A pending **file** whose id already holds a terminal row is not startable with `worc run`: when it is that task's own leftover file (a `manual_action_required` task's file stays where it was), `run` refuses before starting (`run: <id> already reached a terminal; …`, exit `1`) and names `worc rerun` / `worc finalize`; a *different* file reusing the id reaches the gate and is rejected as `duplicate_task_id`. The leftover is resumed with `worc rerun`, not started. This is the one lifecycle trap that will otherwise make you loop on the same file all night.
 6. Name the settings that make a night run fail closed, and say so in the plan: `repo.branch_mode: current` (depends on the live checkout — a poor fit unattended), `telegram.enabled: false` while a queued task's flow carries a `hitl` node (that node fails closed with no transport), `orchestrator.auto_mode.confirm_next_task: true` without Telegram, `security.trust_level: strict` (more approval gates, and with no transport an approval is a stop), `auto_merge: true`.
 7. `depends_on` is **merge**-gated, and this run does not merge anything. A queued task that depends on a task finishing tonight will not become eligible tonight. Name those tasks in the plan and leave them out of the queue instead of retrying them until morning.
 
@@ -47,7 +47,7 @@ The exit code is the verdict, and it is the most reliable signal in the system:
 | --- | --- | --- |
 | `0` | `done` | Write the note. Next task. |
 | `3` | Parked — every provider was transiently unavailable; the task is resumable at its checkpoint | **Does not spend an attempt.** Wait, then resume the same task. The orchestrator's own ceiling is `agents.retry.max_blocked_s` (default 6h); do not out-wait it. |
-| `1` | `failed` | Diagnose, then climb one rung of the ladder. |
+| `1` | `failed` — **or** a refusal before the start | A line beginning `run:` means the task never started (the clone is owned by another engine, or the file is a terminal task's leftover — step 5 of *Before the operator goes to sleep*); resolve that, it does not spend a start. Otherwise diagnose, then climb one rung of the ladder. |
 | `2` | `manual_action_required` — **or** a config/usage error | Disambiguate on stdout: a real terminal prints `<id>: manual_action_required`, while the error paths print `error: …` or `manual action required: …`. A config error is not a task failure — fix the environment or stop the session. |
 
 If a task stops moving — `elapsed_since_update_seconds` far past the provider's `timeout_seconds` with no node change — treat it as wedged. `worc run` installs no cooperative stop, so the only handle is the background process you started: kill it, then resume the task with `worc rerun <id> --continue`. Record that you did.
@@ -88,7 +88,7 @@ After the fourth start fails, stop. Leave the task in whatever terminal it reach
 ## Never
 
 - Never commit, push, or open a pull request for a task's work, and never "finish the job by hand". Publication belongs to the orchestrator alone; that invariant does not bend because a run stopped one step short.
-- Never merge a pull request. The night produces open PRs; merging is the operator's morning decision. (`worc merge-task` also currently aborts on exactly the conflict it exists to resolve — so it is not a fallback either.)
+- Never merge a pull request. The night produces open PRs; merging is the operator's morning decision.
 - Never weaken the security envelope: no `security.*` edit, no `--dangerously*`, `--yolo`, `--ignore-rules`, `--permission-mode bypassPermissions`, or `--sandbox danger-full-access`, in any spelling, anywhere.
 - Never delete `.worc/runs/exchange-quarantine/**`, nor the logs and run artifacts of a task that ended `failed` or `manual_action_required`. Nothing reclaims them automatically for exactly this reason.
 - Never run two tasks at once, and never start one while another engine owns the clone.

@@ -13,7 +13,7 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{task_id}` | agent, evaluator, supervisor | never (always present) |
 | `{stage}` | agent, evaluator | never — the current node's id |
 | `{repo_path}` / `{repo}` | agent, evaluator, supervisor | never — the repository clone directory (`{repo}` is an alias) |
-| `{task_path}` | agent, evaluator | no on-disk task file exists (rare) |
+| `{task_path}` | agent, evaluator | no on-disk task file exists (rare), and always in the `merge` flow (`worc merge-task`), whose context is the conflicted tree — see `{conflicts_path}` |
 | `{plan_path}` | agent, evaluator | planning has not run yet, or the node that fills the `plan` output slot is disabled |
 | `{diff_path}` | agent, evaluator | no workspace-write edit has happened yet |
 | `{checks_path}` | agent, evaluator | the `checks` node has not run yet (it publishes on both outcomes — see `reference.md`) |
