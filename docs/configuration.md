@@ -38,10 +38,10 @@ Two defaults differ between the dataclass/loader and what `install` writes, and 
 ## `schema_version`
 
 ```yaml
-schema_version: 40
+schema_version: 41
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `40`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations → Upgrading the orchestrator](operations-install.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `41` — the bump to 41 added [`repo.governance_paths`](configuration-runtime.md#repo)). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations → Upgrading the orchestrator](operations-install.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 

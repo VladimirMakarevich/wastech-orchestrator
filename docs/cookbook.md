@@ -120,8 +120,11 @@ claude-binary: /opt/homebrew/bin/claude -> /opt/homebrew/Cellar/claude/2.1.210/b
 codex: OK — codex 0.144.4 available (version=0.144.4, auth=logged_in)
 codex-binary: /Users/me/.codex/bin/codex (inside CODEX_HOME)
 codex: isolation smoke OK — codex workspace-write sandbox: OS-enforced (empty MCP inventory)
-isolation: OK (advanced mode)
-isolation-floor: OK — sandbox enforceable on this host
+isolation: OK (strict_isolation=false)
+read-isolation: OFF (strict_isolation=false)
+isolation-floor: NONE (claude: strict_isolation=false — no OS sandbox on any host)
+advanced-mode: ON (security.strict_isolation=false) — full freedom for the agent under the operator's responsibility, except the floor; guide/config/security.md says what that floor holds and what it does not
+git-evidence: ON (security.allow_git_evidence=true) — inert under strict_isolation=false
 allowed-environment: OK — 9 name(s) after expansion (git/gh scope)
 gh-repo-pin: OK — every gh call pinned to OWNER/REPO (from repo.url)
 checks: 1 command set(s):
@@ -131,7 +134,7 @@ telegram: SKIP (disabled)
 preflight: ready
 ```
 
-Three of those lines are new enough to call out. **`isolation: OK (advanced mode)`** is what a fresh install produces, because it wrote `strict_isolation: false` — see section 2. **`isolation-floor:`** answers a different question: whether an OS-enforced write floor exists for this run at all, and it is **advisory** — it says loudly that `.git` and `.worc` are writable here and the run continues. Two things print `isolation-floor: NONE`: a host that cannot sandbox (native Windows, or Linux/WSL2 without `bubblewrap` + `socat`), at either setting, and `strict_isolation: false` itself on **every** host, because the advanced mode raises no OS sandbox for Claude anywhere. So on a fresh install expect `NONE` rather than the `OK` shown above; Codex is unaffected, since it always gets a generated permission profile. **`gh-repo-pin:`** says whether every `gh` call is pinned to a repository; when `repo.url` names no hosted repo and the clone's `origin` cannot be parsed either, nothing is pinned and this fails (with `create_pull_request` on) rather than switching the guarantee off quietly.
+Three of those lines are new enough to call out. **`isolation: OK (strict_isolation=false)`** plus the `advanced-mode: ON` line is what a fresh install produces, because it wrote `strict_isolation: false` — see section 2. **`isolation-floor:`** answers a different question: whether an OS-enforced write floor exists for this run at all, and it is **advisory** — one `isolation-floor: NONE (<provider>: <cause>)` status line per provider without a floor, naming only the cause (what the missing floor costs is in `.worc/guide/config/security.md`), and the run continues; a host with a floor prints no such line. Two things print `isolation-floor: NONE`: a host that cannot sandbox (native Windows, or Linux/WSL2 without `bubblewrap` + `socat`), at either setting, and `strict_isolation: false` itself on **every** host, because the advanced mode raises no OS sandbox for Claude anywhere. So on a fresh install expect the Claude `NONE` line shown above on any host; Codex is unaffected, since it always gets a generated permission profile. **`gh-repo-pin:`** says whether every `gh` call is pinned to a repository; when `repo.url` names no hosted repo and the clone's `origin` cannot be parsed either, nothing is pinned and this fails (with `create_pull_request` on) rather than switching the guarantee off quietly.
 
 `worc preflight` is the only caller that opts into the live no-model **isolation capability smoke** (the `isolation smoke` line above): Codex runs a real `codex sandbox` probe of the generated permission profile, so an old CLI, a missing sandbox helper, or a mis-generated policy surfaces here instead of mid-run. It runs at either value of `strict_isolation` — under `false` most of all, since there the profile is the whole local floor. The installer's own post-write preflight stays offline and prints no such line. A proven policy leak fails preflight unconditionally; an undemonstrable sandbox is fatal only when there is no fallback provider — and **"nothing was written" is never a pass**: a probe that cannot tell an enforced sandbox from a model that never tried reports `NOT DEMONSTRATED`.
 
@@ -213,7 +216,7 @@ Exit codes:
 | Exit | Meaning |
 | --: | --- |
 | `0` | The task reached `done`. |
-| `1` | The task reached `failed`. |
+| `1` | The task reached `failed` — or `run` refused to start: another executor owns the clone, or the file is a terminal task's own leftover (use `rerun` / `finalize`). |
 | `2` | The task reached `manual_action_required` — or the run was refused before it started (unreadable/too-new config, a dependency that is not merged yet). |
 | `3` | Paused, not terminal: every provider was transiently unavailable. The task stays resumable and the next `run`/`watch`/restart continues it from its checkpoint. Distinguishing this from `1` is the point — a CI job should retry, not triage. |
 
@@ -267,7 +270,7 @@ worc merge-task task-001                 # go-ahead: update branch w/ base, reso
 worc prs --sync --yes                    # record PRs you merged directly on GitHub instead
 ```
 
-A clean base-merge is mechanical; a conflicting one runs the operator-editable `merge` flow (`git.merge_flow`) — an agent resolves the markers, the checks re-run, then the orchestrator commits and merges. On any failure it aborts the merge and leaves the PR open. See [operations.md](operations.md) "Merging a reviewed PR" for flags and the safety-only gate.
+A clean base-merge is mechanical; a conflicting one runs the operator-editable `merge` flow (`git.merge_flow`) — an agent works from the conflict inventory (`{conflicts_path}`, which lists marker-less conflicts too), the checks re-run, then the orchestrator commits and merges. On any failure it aborts the merge and leaves the PR open; a conflicted path left byte-identical to what the merge produced is such a failure (exit `2`, `manual action required`) — finish that path by hand and re-run `merge-task`. See [operations.md](operations.md) "Merging a reviewed PR" for flags and the safety-only gate.
 
 ## 6. Use `watch`
 
@@ -297,6 +300,19 @@ orchestrator:
 ```
 
 Auto mode does not introduce concurrency. There is a single active task slot, and terminal cleanup (checkout back to `repo.base_branch`, or staying on the working branch per `repo.checkout_base_on_cleanup` / the branch mode) must complete before the next task can start.
+
+### Run the queue overnight (`worc-night-run`)
+
+`watch` stops at the first task that needs a human. For a night where something _will_ go wrong, hand the queue to an agent running the packaged `worc-night-run` skill instead — it drives the tasks one at a time with `worc run`, retries a stuck task through a bounded four-start ladder, abandons it on a security refusal, never publishes or merges anything itself, and leaves a write-up per task:
+
+```bash
+mkdir -p .claude/skills && cp -R .worc/guide/skills/worc-night-run .claude/skills/   # once; again after upgrade-docs
+worc preflight && worc validate-flow --all      # the skill runs this gate itself, but fix failures while you are awake
+# then ask the agent: "run the pending queue overnight with worc-night-run"
+ls .worc/night-runs/                            # in the morning: <stamp>/report.md + one <task-id>.md per task
+```
+
+See [operations → Unattended night runs](operations-running.md#unattended-night-runs-the-worc-night-run-skill) for what it may and may not touch.
 
 To run several `worc` instances against one git-distributed task pool without them colliding, give each one a queue: `orchestrator.queue` (default `"default"`, overridable per launch with `worc watch --queue NAME`) is matched by plain string equality against a task's own `queue` front-matter field, and an instance only ever claims tasks that match. An untagged task carries `"default"`, so a single untagged instance behaves exactly as it does with no queues at all.
 
@@ -329,7 +345,7 @@ python -m wastech_orchestrator --config ./config.yaml status
 python -m wastech_orchestrator --config ./config.yaml status task-001
 ```
 
-Without a task id, `status` shows active tasks or the most recently updated task. It reports the task id and title, the persisted status, the flow checkpoint node (where the engine would resume), branch, subtask, fix counter, last update time, elapsed time since that update, and the last cleanup error if there is one — then the same configured-command-set summary `preflight` prints. It opens `state.db` read-only.
+Without a task id, `status` shows active tasks or the most recently updated task. It reports the task id and title, the persisted status (a display label such as `parked (no daemon)` or `done (recovered: <loop>)`), the flow checkpoint node (where the engine would resume), branch, subtask, fix counter, last update time, elapsed time since that update, a `cost_not_accounted=` line when some attempt carries no recorded cost (Codex reports none), and the last cleanup error if there is one — then the same configured-command-set summary `preflight` prints. It opens `state.db` read-only.
 
 For a single attended surface instead of re-running `status`, use `worc top` — a live, read-only monitor that auto-refreshes the active task + flow node, a parked/gate-pending marker, the queue (filtered to the served queue and priority-sorted, exactly as the daemon runs it), recent terminal tasks, and a tail of the daemon log. Point it at the daemon's log file and quit with `q`:
 
@@ -527,7 +543,7 @@ The most useful files are:
 
 ```text
 .worc/logs/
-  completed.jsonl                 # the ledger: one record per terminal task
+  completed.jsonl                 # the ledger: one record per terminal transition
   daemon.log                      # the watch daemon's live stream (+ rotated backups)
   daemon-startup.log              # only the daemon's pre-configuration output
   <task-id>/
@@ -544,7 +560,8 @@ The most useful files are:
       run-<node-run-id>/          # every re-run kept: rendered-prompt.md, findings.json, <id>.out.md, …
     summary.md / summary.json
     failure_report.json
-    stuck.md
+    stuck.md                      # recovered-* when the task still finished `done`
+    merge/conflicts.md            # merge-task's conflict inventory
     publish/
 ```
 
@@ -563,6 +580,7 @@ Do not live-tail provider `stdout.log` or `stderr.log`: provider output is final
 | Cause | Action |
 | --- | --- |
 | Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually, refine the task, or grant a fresh budget with `worc rerun <id> --continue --reset-fix-budget`. |
+| A loop stopped early (`limit_exhausted: no_file_change` or `repeated_findings`) | `no_file_change`: the agent kept answering without editing — find the blocker in the latest fixing output. `repeated_findings`: the critic returned the same findings three times — read that finding first; it usually asks for something the node cannot change. Fix the cause, then `rerun --continue`. |
 | Checks gate incomplete (required toolchain absent, or every selected set skipped) | Install the toolchain, narrow the selecting `paths`, or disable that checks node for the task. A fix loop cannot install toolchains, so this never routes to `fixing`. |
 | A green check mutated the working tree | A passing check that rewrote commit-candidate files (an auto-formatter, a codegen step) fails closed rather than passing silently. Replace it with the tool's check-only mode (`--check`, `--dry-run`), then `rerun --continue`. |
 | An evaluator could not run (infra or misconfiguration) | The already-green diff is deliberately preserved on the branch instead of being failed — review and publish it by hand, or fix the evaluator's node and `rerun --continue`. |

@@ -67,6 +67,7 @@ repo:
   base_branch: "main"
   branch_prefix: "worc"
   branch_mode: "new"
+  governance_paths: [] # e.g. [".rules/**", "docs/conventions/**"]
 ```
 
 | Field | Type | Default | Meaning |
@@ -77,6 +78,7 @@ repo:
 | `branch_prefix` | string | `"worc"` | Prefix for default task branches: `worc/<epoch>-<task-id>-<slug>` (`<epoch>` is the unix timestamp at branch-prep time, so a re-run never collides). The full auto-generated name is capped at 50 chars — the slug is truncated to fit, or dropped entirely if the prefix already fills the budget. A task-level `branch_name` overrides the full name; an override longer than 50 chars logs a warning and falls back to the auto-generated name. |
 | `branch_mode` | `new` \| `existing` \| `current` | `"new"` | Instance default for **where task git operations point** (added in `schema_version` 26). `new` creates a fresh task branch from `base_branch` (today's behavior). `existing` works in a named, already-existing branch (the task supplies `branch_ref`). `current` works in whatever branch the working tree is on — no create, switch, pull, or clean-tree requirement. A per-task `branch_mode` overrides this. A branch is **orchestrator-owned only in `new`** — destructive git ops (reset-to-base, force-checkout-away, branch delete) run only there, and a fresh `rerun` in `existing`/`current` is refused (use `rerun --continue`). See [task authoring](task-authoring.md#branch_mode). |
 | `checkout_base_on_cleanup` | `bool` \| `null` | `null` | Whether terminal cleanup returns the working tree to `base_branch` after a terminal outcome (added in `schema_version` 30). `null` (default) defers to `branch_mode`: `new` returns to base, `existing` and `current` stay on the branch. `false` never returns (a global off switch, including `new`); `true` forces `new` and `existing` to return. `current` always stays regardless (the operator owns its tree). Instance-only — no per-task override. Set `false` (or use `existing`/`current`) when every task runs on one shared branch and the switch-back is pure noise. |
+| `governance_paths` | list of repo-relative globs | `[]` | Where **this** repository keeps its rules, **added** to the set a run always reports on — `.agents/rules/**` plus the root `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` (added in `schema_version` 41). A task whose diff touches one gets a notice — a run-log `WARNING`, a `## Governance files changed` section in the summary / PR body, the ledger's `governance_changed`, and the Telegram completion message — never a block. Additive only, by shape: the globs are unioned with the built-in set, the key has no exclusion syntax, and a value that looks like one is refused at load — a leading `!`, an absolute path, a `~`, a `..` traversal. So no configuration can narrow the notice or switch it off; set the key when your rules live elsewhere (`.rules/**`, `docs/conventions/**`), or half a governance edit ships unannounced. Same glob matcher as `security.protected_paths`. |
 
 Git credentials are not stored in this file. Configure SSH, a credential helper, or `gh auth login` outside the orchestrator.
 
@@ -145,11 +147,13 @@ The `artifacts` level prunes each attempt directory at the end of a run (after t
 
 | Level | Files kept |
 | --- | --- |
-| `minimal` | `result.json` only — even on failure (it records the exit code + normalized error class). |
-| `standard` | `result.json`, `stdout.log`, `stderr.log`. (`events.jsonl` is a redacted copy of `stdout.log`, so nothing unique is lost; `request.json` is dropped.) |
-| `full` | everything: `request.json`, `stdout.log`, `stderr.log`, `events.jsonl`, `output-schema.json`, `result.json`. |
+| `minimal` | `result.json` + `request.json` — even on failure (the outcome, and what was requested to produce it). |
+| `standard` | `result.json`, `request.json`, `stdout.log`, `stderr.log`. (`events.jsonl` is a redacted copy of `stdout.log`, so nothing unique is lost.) |
+| `full` | everything: adds `events.jsonl`, `output-schema.json`, and any other provider extras. |
 
-`minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines. This level governs **only** the per-attempt provider files inside each `<attempt>-<provider>/` dir. Prompt-audit is **independent** of it (governed by [`prompt_audit`](configuration-flows-supervisor.md#prompt_audit)), and so is the **per-run operator-facing history** — the rendered prompt, review findings/summary, generic `<node-id>.out.md`, checks reports, and tool streams written at the `stages/<node-id>/run-<node-run-id>/` level (above the attempt dir), plus the once-only task-level slots (`plan.md`, `summary.md`, `current.diff`). None of these is ever pruned by `artifacts`; the only thing that removes them is an explicit [`worc logs clean`](operations.md) of the whole task tree. Reclaim disk from accumulated task directories that way.
+`request.json` is kept at **every** level: it is the only artifact carrying the full `argv` and the permission profile an attempt ran under, `result.json` cannot be read without knowing what was requested, and it costs kilobytes against the megabytes of raw `stdout.log`. `result.json` also names the **effective** `model` / `reasoning` the attempt ran on (the same values `provider_attempts.model` / `.reasoning` hold), so per-model spend needs neither `prompt_audit` nor the raw stream.
+
+`minimal` makes remote post-mortem debugging harder (no stdout/stderr from failed runs); use it only on well-understood, frequently-run pipelines — but it is also the single biggest disk saving a run offers, since raw provider `stdout.log` is almost all of a task's log size, which is why every successful terminal names it (see [operations → `logs clean`](operations-logs.md#cleaning-up-logs-logs-clean)). This level governs **only** the per-attempt provider files inside each `<attempt>-<provider>/` dir. Prompt-audit is **independent** of it (governed by [`prompt_audit`](configuration-flows-supervisor.md#prompt_audit)), and so is the **per-run operator-facing history** — the rendered prompt, review findings/summary, generic `<node-id>.out.md`, checks reports, and tool streams written at the `stages/<node-id>/run-<node-run-id>/` level (above the attempt dir), plus the once-only task-level slots (`plan.md`, `summary.md`, `current.diff`). None of these is ever pruned by `artifacts`; the only thing that removes them is an explicit [`worc logs clean`](operations.md) of the whole task tree. Reclaim disk from accumulated task directories that way.
 
 ## `memory`
 

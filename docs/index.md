@@ -14,7 +14,7 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 | [Operations](operations.md) | The entry page of the operations guide: the map of its six chapters |
 | [Operations → install, upgrade, authorize](operations-install.md) | Binding the orchestrator to a repository, moving it to a new version, and where credentials live |
 | [Operations → preflight](operations-preflight.md) | What `preflight` proves, the command-set summary, and validating flows |
-| [Operations → running tasks](operations-running.md) | `run` and `watch`, provider outages, `rerun` / `finalize` / `merge-task`, and the stop ladder |
+| [Operations → running tasks](operations-running.md) | `run` and `watch`, unattended night runs, provider outages, `rerun` / `finalize` / `merge-task`, and the stop ladder |
 | [Operations → logs, state, notifications](operations-logs.md) | Structured logs, `logs clean`, `runs clean`, `worc memory`, and Telegram |
 | [Operations → git footprint and publishing](operations-publishing.md) | The audit commit, the PR body, auto-merge, and per-task node overrides |
 | [Operations → diagnostics and recovery](operations-diagnostics.md) | Reading a run's artifacts, and the `manual_action_required` playbook |

@@ -46,7 +46,7 @@ This is where the order can loop:
 - If **testing** fails, the task goes to **fixing**, then back to **testing** — over and over until it passes.
 - If **review** finds blocking problems, the task goes to **fixing**, then back through **testing** and **review** again.
 
-This cannot loop forever. There is a safety limit on how many fix attempts are allowed — by default 15 for any one loop and 30 across the whole task, whichever is reached first. If a limit is reached, the orchestrator stops on its own, writes a short report of what was still wrong, and leaves the task for a human to look at.
+This cannot loop forever. There is a safety limit on how many fix attempts are allowed — by default 15 for any one loop and 30 across the whole task, whichever is reached first. If a limit is reached, the orchestrator stops on its own, writes a short report of what was still wrong, and leaves the task for a human to look at. It also stops a loop early when the attempts are plainly going nowhere — the agent keeps answering without changing any file, or the reviewer returns exactly the same findings three times in a row — and the report says which of the two it was, because they call for different fixes.
 
 A few things can pause a run for a person:
 
@@ -96,7 +96,7 @@ The list of steps above is the **default** flow, used for ordinary coding tasks.
 - **content_chapter / content_translate** — long-form book content-authoring flows: edit a chapter, or adapt a chapter into English, each gated by the deterministic `check_chapter` prose tool (delivered to `.worc/tools/` by `install`).
 - **blog_article / blog_article_revise** — authorial blog-post flows: write a new article from scratch, or revise an existing one in place, each gated by the deterministic `check_length` minimum-size floor (delivered to `.worc/tools/` by `install`) and a tone/style critic.
 
-There is one more built-in that tasks never select: **merge**. It comes into play only when an operator merges a finished task's pull request with `worc merge-task` and pulling the base branch into the task branch hits a conflict — an agent resolves the markers, the checks re-run, and then the orchestrator finishes the merge itself. A conflict-free merge is purely mechanical: no flow, no agent.
+There is one more built-in that tasks never select: **merge**. It comes into play only when an operator merges a finished task's pull request with `worc merge-task` and pulling the base branch into the task branch hits a conflict — an agent is handed a list of every conflicted file (not only the ones with conflict markers: a file one side deleted, or a binary file, conflicts without any), resolves them, the checks re-run, and then the orchestrator finishes the merge itself. If a conflicted file comes back exactly as the merge left it, the orchestrator refuses to commit a decision nobody made: it aborts the merge and leaves the pull request open for a person. A conflict-free merge is purely mechanical: no flow, no agent.
 
 All flows use the same machinery — the same gates, the same fix loops, the same read-only supervisor. They differ only in the steps and the kind of output. None of them is hidden away in the tool, either: `install` copies every built-in flow into the project's own `.worc/flows/`, and that copy is what actually runs — so an operator edits a built-in in place, or adds a file there to introduce a new task type. See [Flow authoring](flow-authoring.md).
 

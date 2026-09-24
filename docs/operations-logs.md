@@ -48,7 +48,9 @@ Two safety refusals, each with its own message:
 - **A task is active** → the command refuses outright rather than deleting artifacts a running task is still writing. Run it while `watch` is idle.
 - **A watch daemon is live** → the task dirs are swept but the **daemon logs are held back**, because the daemon has them open and `top`/`shell` are tailing them. Stop the daemon first if reclaiming those is the point.
 
-To bound the footprint going forward instead of cleaning periodically, lower the per-run artifact retention with [`logging.artifacts`](configuration-runtime.md#logging) (`minimal` / `standard` / `full`).
+To bound the footprint going forward instead of cleaning periodically, lower the per-run artifact retention with [`logging.artifacts`](configuration-runtime.md#logging) (`minimal` / `standard` / `full`) — raw provider `stdout.log` is almost all of a task's log size, so `minimal` is the single biggest saving (`request.json` and `result.json` are kept at every level).
+
+**Every successful terminal says this once.** Per-task log dirs are never removed automatically, and `clean_runs_on_success` reclaims only `runs/` — two true facts that read as "the logs did not get cleaned". So a task that ends `done` logs one line joining them: whether its run state was reclaimed (or kept because `logging.clean_runs_on_success` is off), where its logs are and how big (``run state reclaimed; this task's logs kept at <path> (14.2 MB) — reclaim with `worc logs clean`, and `logging.artifacts: minimal` keeps far less of it next time``). It is an `INFO` record (with `logs_kept_bytes` / `runs_evicted` fields), so it shows at `logging.level: info` or `--log-level info`, not at the shipped `warning`.
 
 > `daemon-startup.log` no longer grows with the run. A console-spawned daemon drops its stderr handler once its `--log-file` is configured, so that file holds only the pre-configuration output — the real startup error `worc shell`'s `up` surfaces when a daemon dies before it can log anywhere else. The daemon's live stream is `daemon.log` (or whatever `--log-file` names).
 
@@ -62,6 +64,8 @@ worc runs clean --keep 5               # keep the 5 most recently touched tasks
 worc runs clean --include-quarantine   # also drop quarantined exchange evidence
 worc runs clean --yes                  # skip the confirmation prompt
 ```
+
+A quarantine bundle is written only when there is something in it, and its `evidence.json` carries `created_at`, the `node_id` whose attempt mutated the exchange and the task `attempt` (the ledger's ordinal for that terminal), so two bundles under one task id order and attribute themselves. The task row keeps every bundle it produced in `tasks.quarantine_refs`, which — unlike the `exchange_contaminated` flag an operator `rerun --continue` clears — is never cleared.
 
 Like `logs clean` it refuses while a task is active. `--keep N` runs without a prompt except `--keep 0`. What the orchestrator leaves in a target repository, and how each part grows, is owned by the shipped page `.worc/guide/footprint.md` — including the ledger's uncapped growth (~630 B per terminal task, the one artifact no retention setting bounds).
 
