@@ -4000,7 +4000,7 @@ def test_a_host_without_a_floor_is_announced_and_the_run_continues(
     row = store.get_task("task-floor")
     assert row is not None and row.status is not Status.FAILED
     assert git_run(["branch", "--list", "worc/*"], git_repo.clone) != ""  # the run went ahead
-    assert any("isolation floor NONE — claude: no OS sandbox" in m for m in messages)
+    assert any("isolation floor NONE (claude: no OS sandbox" in m for m in messages)
 
 
 def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
@@ -4058,9 +4058,9 @@ def test_the_mode_announces_the_missing_floor_through_the_real_check_table(
     The sibling floor test monkeypatches `describe_host_floor`, so it proves the log framing and
     nothing about which runs get a line. This one goes through the real `HOST_FLOOR_CHECKS` on an
     injected macOS host — the class that reported NO gap before, and is exactly where the mode was
-    keeping a sandbox it promised not to. Both halves of the sentence are asserted: the provider's
-    reason and the shared cost tail, since the two live in different modules and only their
-    concatenation is what an operator reads.
+    keeping a sandbox it promised not to. The whole line is asserted, framing included,
+    because there is nothing else to it: a status line carrying the provider's cause, since the
+    recital of what the missing floor costs moved to `guide/config/security.md`.
     """
     monkeypatch.setattr(
         claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
@@ -4080,8 +4080,9 @@ def test_the_mode_announces_the_missing_floor_through_the_real_check_table(
     assert result.final_status is not Status.FAILED  # announced, never refused
     floor = [m for m in messages if "isolation floor NONE" in m]
     assert len(floor) == 1, messages
-    assert "claude: the advanced mode" in floor[0]
-    assert "EVERY node here keeps an unsandboxed shell" in floor[0]
+    assert floor[0] == (
+        "isolation floor NONE (claude: strict_isolation=false — no OS sandbox on any host)"
+    )
 
 
 def test_a_default_run_carries_the_mode_marker_as_false(

@@ -3179,7 +3179,7 @@ class Orchestrator:
         for mode_line in describe_advanced_mode(self._config):
             self._log(p.task.id).warning(mode_line)
         for floor_gap in describe_host_floor(self._config, self._host_floor_checks):
-            self._log(p.task.id).warning(f"isolation floor NONE — {floor_gap}")
+            self._log(p.task.id).warning(f"isolation floor NONE ({floor_gap})")
 
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.

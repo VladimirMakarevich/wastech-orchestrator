@@ -3595,9 +3595,11 @@ def run_preflight(
 
     # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
     # is missing either way, and refusing to run would leave the operator without the guarantee AND
-    # without the work. The same text lands in the run log, from the same formatter.
+    # without the work. One status line per provider, in the shape of the two above it (subject,
+    # verdict, cause) rather than the paragraph it used to print — what the missing floor costs is
+    # `guide/config/security.md`'s job. The same text lands in the run log, from the same formatter.
     floor_gaps = describe_host_floor(config, HOST_FLOOR_CHECKS)
-    lines.extend(f"isolation-floor: NONE — {gap}" for gap in floor_gaps)
+    lines.extend(f"isolation-floor: NONE ({gap})" for gap in floor_gaps)
     # The price of keeping that verdict advisory: "a node can still fall back to the other
     # provider" is the compensation that makes it advisory, and it does not exist when only one
     # provider is allowed. Under strict isolation the attempt that needs a sandboxed shell is then
