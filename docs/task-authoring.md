@@ -576,6 +576,10 @@ Add retries to webhooks.
 
 Reason: `injection_suspected`. Task body content is not used to build CLI arguments, but front matter is still scanned defensively.
 
+## Editing a task while it runs
+
+You cannot change a running task by editing its file. The task packet is frozen when the run starts and every node reads the frozen copy — that is what makes a run reproducible, and what stops a node with write access from rewriting the instructions it is judged against. The edit is not silent, though: on the next resume the orchestrator compares your file with the frozen packet and, when they differ, logs a `WARNING` naming the instant the packet was frozen and saying that `worc stop` plus a fresh start is what applies the edit; the same sentence goes into `summary.md` (and so the pull request) under `## Task file changed after the run started`. With the lifecycle tree tracked in git, expect such a run to end `manual_action_required`: the audit commit refuses a lifecycle task file that no longer matches the packet the work was judged against.
+
 ## JSON Tasks
 
 JSON tasks are supported for integrations that generate structured input:
