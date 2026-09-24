@@ -208,6 +208,10 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
+    # The merge flow's conflict inventory: every conflicted path, its kind, and what the working
+    # tree holds for it. Its own field rather than a reused one, because a node resolving a merge
+    # is told what conflicted, not what the task was.
+    conflicts_path: str | None = None
     # On a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
     # account of what it did or why it could not address the last findings. Set by the evaluator
     # runner from the exchange (``None`` on the first pass / for non-evaluator requests), so the
@@ -304,6 +308,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("conflicts", request.conflicts_path),
         ("prior_fix", request.rework_report_path),
         ("human_input", request.human_input_path),
         ("packet", request.supervisor_packet_path),
@@ -460,6 +465,15 @@ class AgentRunResult:
     # and persisted by the orchestrator, not stored here.
     normalized_usage: NormalizedUsage | None = None
     session_id: str | None = None  # for auditing only
+    # The EFFECTIVE model and reasoning this attempt ran on — the node's override when it declared
+    # one, else the provider's configured default — resolved by the adapter through the same
+    # :class:`ProviderConfig` accessors the argv builder uses, so the record cannot describe a
+    # launch that did not happen. Written into ``result.json``, which until now carried eleven
+    # fields and not the one an operator opens it to find: with ``prompt_audit`` off (the default)
+    # the model that ran a node survived only inside ``stdout.log``. ``None`` when the provider was
+    # given no model/reasoning at all and configures none — the CLI's own default then decided.
+    model: str | None = None
+    reasoning: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
     event_log_path: str | None = None

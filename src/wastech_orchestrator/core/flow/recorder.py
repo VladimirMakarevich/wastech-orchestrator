@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from wastech_orchestrator.core.flow.nodes.tool import tool_reported_data
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
 from wastech_orchestrator.ledger import (
@@ -32,8 +33,12 @@ from wastech_orchestrator.ledger import (
     NodeFailureEvidence,
     write_failure_report,
 )
-from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
-from wastech_orchestrator.state_store import NodeRunRow, StateStore
+from wastech_orchestrator.providers.artifacts import (
+    TOOL_STDOUT_FILENAME,
+    node_run_dir,
+    task_artifact_dir,
+)
+from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow, StateStore
 
 
 def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
@@ -50,6 +55,65 @@ def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
     except json.JSONDecodeError:
         return None
     return findings if isinstance(findings, list) else None
+
+
+def failing_node_evidence(
+    store: StateStore, task_id: str, node_id: str | None
+) -> NodeFailureEvidence:
+    """What the failing node's own runs prove: its provider attempts, and why it has no check log.
+
+    The single derivation of a stuck report's node evidence, shared by the loop-guard path (this
+    module's recorder) and the infra path in the orchestrator. Two copies is how one of them came
+    to ship an empty ``provider_attempts`` list on a report whose node had eight attempts: the
+    evidence is read from the store, where both node runners already wrote it *before* raising, so
+    it is durable by the time any terminal is decided.
+
+    ``NodeFailureEvidence()`` when there is no node to attribute anything to — a whole-task dump
+    would mix in nodes that already succeeded and the supervisor layer's own calls.
+    """
+    if node_id is None:
+        return NodeFailureEvidence()
+    runs = [run for run in store.get_node_runs(task_id) if run.node_id == node_id]
+    if not runs:
+        return NodeFailureEvidence(node_id=node_id)
+    # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
+    # region legitimately runs the same node id several times within one task.
+    last = runs[-1]
+    attempts: tuple[dict[str, Any], ...] = ()
+    if last.id is not None:
+        # An explicit whitelist, never the whole row: the attempt directory is a path into the
+        # private artifact tree and the usage columns are not part of an operator artifact.
+        attempts = tuple(
+            {
+                "provider": row.provider,
+                "attempt": row.attempt,
+                "error_class": row.error_class,
+                "exit_code": row.exit_code,
+                "started_at": row.started_at,
+            }
+            for row in store.get_provider_attempts(last.id)
+        )
+    return NodeFailureEvidence(
+        node_id=node_id,
+        provider_attempts=attempts,
+        check_log_note=_check_log_note(last),
+    )
+
+
+def _check_log_note(row: NodeRunRow) -> str | None:
+    """Why this node run has no ``check_runs`` entry, or ``None`` when nothing can be said.
+
+    Only one kind is answerable without guessing: a ``tool`` node never writes ``check_runs`` at
+    all, so its report's null check log is a fact about the node rather than an empty search. Its
+    output is on disk under the run directory, which is what the note points at.
+    """
+    if row.node_kind != "tool":
+        return None
+    where = f"stages/{row.node_id}/run-{row.id:06d}/{TOOL_STDOUT_FILENAME}" if row.id else "its run"
+    return (
+        f"no check log: '{row.node_id}' is a tool node, and tool nodes do not write check runs — "
+        f"their output is the redacted stream at {where} under this task's log directory"
+    )
 
 
 def read_final_diff(artifacts_root: str | Path, task_id: str) -> str:
@@ -80,7 +144,15 @@ class StepFacts:
 
     ``message`` is the node's closing text verbatim. Bounding it is the job of whoever renders it
     into a size-limited surface, not of the fact: a truncated record would make the truncation
-    permanent for every later reader.
+    permanent for every later reader. The same holds for the three fields below.
+
+    ``tool_data`` / ``tool_stdout`` are what a ``tool`` node reported — its structured ``data``
+    object as canonical JSON text, and its redacted stdout — and ``findings`` is the verdict an
+    ``evaluator`` run recorded, as the stored JSON. All three are ``None`` on every node kind that
+    produces none. They are on the record rather than left as paths on purpose: the exchange is
+    gone after terminal cleanup and the private tree is unreadable to an agent at either value of
+    ``security.disable_read_isolation``, so a step that names a file says nothing to the reader the
+    packet is built for.
     """
 
     node_id: str
@@ -97,6 +169,9 @@ class StepFacts:
     started_at: str | None
     finished_at: str | None
     message: str | None
+    tool_data: str | None
+    tool_stdout: str | None
+    findings: str | None
 
 
 def fell_back_from(row: NodeRunRow) -> str | None:
@@ -112,8 +187,19 @@ def fell_back_from(row: NodeRunRow) -> str | None:
     return None
 
 
-def step_facts(row: NodeRunRow, message: str | None) -> StepFacts:
-    """One run row plus its closing message as the run's :class:`StepFacts`."""
+def step_facts(
+    row: NodeRunRow,
+    message: str | None,
+    *,
+    tool_data: str | None,
+    tool_stdout: str | None,
+    findings: str | None,
+) -> StepFacts:
+    """One run row plus what that run reported, as the run's :class:`StepFacts`.
+
+    Keyword-only and required, like every field of the record: a construction site that forgets
+    what a tool or an evaluator said produces a step that silently reads as having said nothing.
+    """
     return StepFacts(
         node_id=row.node_id,
         node_kind=row.node_kind,
@@ -129,19 +215,77 @@ def step_facts(row: NodeRunRow, message: str | None) -> StepFacts:
         started_at=row.started_at,
         finished_at=row.finished_at,
         message=message,
+        tool_data=tool_data,
+        tool_stdout=tool_stdout,
+        findings=findings,
     )
 
 
 def collect_step_facts(
-    node_runs: Sequence[NodeRunRow], artifacts_root: str | Path, task_id: str
+    node_runs: Sequence[NodeRunRow],
+    artifacts_root: str | Path,
+    task_id: str,
+    evaluations: Sequence[EvaluationRow] = (),
 ) -> tuple[StepFacts, ...]:
     """The task's step record: one :class:`StepFacts` per run, in the order they executed.
 
     Takes the rows rather than a store handle, so the caller keeps ownership of the query — the
     supervisor layer reads them through its own narrow store port, which is not the concrete store
-    this module's other helpers take.
+    this module's other helpers take. ``evaluations`` is the same list for the whole task, indexed
+    here by the run each verdict came from: one ``findings_path`` for a flow with two lenses and ten
+    rework rounds names the last evaluator and nothing else, so a verdict belongs on the step that
+    produced it. It defaults to empty for the observation cadence's short history render, which
+    shows only what each step said.
     """
-    return tuple(step_facts(row, _step_message(artifacts_root, task_id, row)) for row in node_runs)
+    by_run = _verdicts_by_run(evaluations)
+    facts: list[StepFacts] = []
+    for row in node_runs:
+        data, stdout = _tool_output(artifacts_root, task_id, row)
+        facts.append(
+            step_facts(
+                row,
+                _step_message(artifacts_root, task_id, row),
+                tool_data=data,
+                tool_stdout=stdout,
+                findings=by_run.get(row.id) if row.id is not None else None,
+            )
+        )
+    return tuple(facts)
+
+
+def _verdicts_by_run(evaluations: Sequence[EvaluationRow]) -> dict[int, str]:
+    """Each in-flow verdict's stored findings JSON, keyed by the ``node_runs`` id that produced it.
+
+    A later verdict for the same run replaces an earlier one, which cannot happen — the evaluator
+    writes one row per run — but leaves the mapping total rather than depending on that.
+    """
+    return {
+        row.source_node_run_id: row.findings_json
+        for row in evaluations
+        if row.kind == "in_flow_verdict" and row.source_node_run_id is not None
+    }
+
+
+def _tool_output(
+    artifacts_root: str | Path, task_id: str, row: NodeRunRow
+) -> tuple[str | None, str | None]:
+    """A ``tool`` run's ``(data as canonical JSON, redacted stdout)`` — ``(None, None)`` otherwise.
+
+    Read back from the run's own ``stdout.txt`` (already redacted when it was written) and parsed
+    through the one statement of the tool output contract, so the record cannot disagree with what
+    the engine routed on. A stream that is not a tool contract at all — a linter's plain text, gated
+    by its exit code — still yields its stdout; only ``data`` is then ``None``.
+    """
+    if row.node_kind != "tool" or row.id is None:
+        return None, None
+    path = node_run_dir(artifacts_root, task_id, row.node_id, row.id) / TOOL_STDOUT_FILENAME
+    try:
+        stdout = path.read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+    data = tool_reported_data(stdout)
+    rendered = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) if data else None
+    return rendered, stdout or None
 
 
 def _step_message(artifacts_root: str | Path, task_id: str, row: NodeRunRow) -> str | None:
@@ -202,8 +346,11 @@ class StateStoreRunRecorder:
             last_review_findings=read_last_findings(self._store, self._task_id),
             final_diff=read_final_diff(self._artifacts_root, self._task_id),
             decomposed=self._decomposed_failure(subtask_order),
-            # A fix-loop terminal spent a budget, not a provider, so it carries no attempt evidence.
-            failing_node=NodeFailureEvidence(node_id=node_id),
+            # A fix-loop terminal spent a budget rather than exhausting a provider — but the
+            # question the report is opened with is still "which provider call produced the finding
+            # that kept repeating", and the attempts are the only thing that answers it. Naming
+            # them was the infra path's privilege for no reason other than where the code lived.
+            failing_node=failing_node_evidence(self._store, self._task_id, node_id),
         )
         self._store.update_task(self._task_id, failure_report_path=report_path)
         return report_path

@@ -75,6 +75,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry, ToolResolutionError
+from wastech_orchestrator.core.loop_control import declared_loop_budget
 from wastech_orchestrator.core.observe_cadence import is_same_or_narrower
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
@@ -896,6 +897,41 @@ def _check_config_consistency(
                 errs.append(cfg(f"node {node.id!r}: {exc}"))
 
     return errs
+
+
+# -- tool-budget anti-surprise lint (non-fatal) -------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ToolBudgetWarning:
+    """A ``tool`` node's declared fix budget is also a ceiling on identical failures.
+
+    Advisory only, and deliberately conditional: whether a tool emits a top-level ``findings`` array
+    is a property of the operator's own program, not of the flow, so nothing here can decide it. It
+    is said where the number is written because that is where the author's expectation forms — a
+    budget of six reads as "six fix rounds", and for a tool that reports only through ``data`` it is
+    instead the point at which an unchanging failure stops the loop.
+    """
+
+    node_id: str
+    budget: int
+
+
+def lint_tool_loop_budgets(snapshot: FlowSnapshot) -> list[ToolBudgetWarning]:
+    """One warning per ``tool`` node whose rework/fail edge carries a declared fix budget.
+
+    Silent for a tool node with no declared number (nothing is promised, so nothing can surprise)
+    and for every other node kind, whose loops are bounded by their evaluator's verdict rather than
+    by a repeated-output detector.
+    """
+    warnings: list[ToolBudgetWarning] = []
+    for node in snapshot.doc.nodes:
+        if not isinstance(node, ToolNode):
+            continue
+        budget = declared_loop_budget(snapshot, node.id)
+        if budget is not None:
+            warnings.append(ToolBudgetWarning(node_id=node.id, budget=budget))
+    return warnings
 
 
 # -- prompt-variable anti-drift lint (non-fatal) ------------------------------

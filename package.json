@@ -1,0 +1,18 @@
+{
+  "name": "wastech-orchestrator-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Node dev tooling for the wastech-orchestrator repository: the Markdown gate. The Python package is built from pyproject.toml and owes nothing to this file.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24.17.0"
+  },
+  "scripts": {
+    "mdlint": "python tools/mdlint.py"
+  },
+  "devDependencies": {
+    "@wastech-mdlint/cli": "0.1.1",
+    "@wastech-mdlint/core": "0.1.1",
+    "@wastech-mdlint/mcp-server": "0.1.1"
+  }
+}

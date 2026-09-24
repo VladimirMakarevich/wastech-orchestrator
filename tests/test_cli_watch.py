@@ -259,6 +259,76 @@ def test_watch_refuses_to_start_when_already_running(
     assert "already running" in capsys.readouterr().out
 
 
+def test_a_watch_that_loses_the_race_leaves_the_winner_running(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The window the check above cannot cover, and the wider of the two: a second daemon claims the
+    # root while this one is still building its engine and printing its banner. Everything the
+    # daemon manages — the marker, the stop sentinel, the agent handle — belongs to whoever holds
+    # the marker, so the loser must touch none of it: clearing the sentinel would swallow a pending
+    # `stop`, and the exit path would reap the winner's agent and drop its marker.
+    worc_home = cli.worc_home_for(in_repo_config)
+    pid_path = process_control.pid_file_path(worc_home)
+    stop_path = process_control.stop_file_path(worc_home)
+    children_path = process_control.children_file_path(worc_home)
+    winner: dict[str, bytes] = {}
+
+    def build_and_lose_the_race(*_a: object, **_k: object) -> object:
+        process_control.write_pid_file(pid_path, pid=4242)
+        stop_path.write_text("stop\n", encoding="utf-8")  # a `stop` already asked the winner to end
+        process_control.write_children_file(children_path, pid=4243, pgid=4243)
+        winner["record"] = pid_path.read_bytes()
+        return object()
+
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", build_and_lose_the_race)
+    monkeypatch.setattr(process_control, "StopController", _FakeController)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    reaped: list[int] = []
+    monkeypatch.setattr(
+        cli.agent_process, "kill_agent_subtree", lambda pid, pgid: reaped.append(pid)
+    )
+    looped: list[int] = []
+    monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: looped.append(1))
+
+    code = cli.main(["watch", "--poll-seconds", "5"])
+
+    assert code == 1
+    assert looped == []  # no second loop over the same queue
+    assert "already running" in capsys.readouterr().out
+    # Neither overwritten by the loser nor reaped by it on the way out.
+    assert pid_path.read_bytes() == winner["record"]
+    assert stop_path.exists()  # the winner's pending stop request survived
+    assert reaped == []  # and its agent was not killed by a process that owns nothing
+    assert process_control.read_children_record(children_path) is not None
+
+
+def test_watch_reclaims_a_pid_file_left_behind_by_a_dead_daemon(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    # A hard kill leaves the marker on disk; refusing on it would block every later watcher.
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(process_control, "StopController", _FakeController)
+    monkeypatch.setattr(process_control, "_can_signal", lambda: True)  # exercise the POSIX path
+    pid_path = process_control.pid_file_path(cli.worc_home_for(in_repo_config))
+    process_control.write_pid_file(pid_path, pid=999111)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
+    claimed: dict[str, int | None] = {}
+
+    def fake_loop(orch: object, config: object, folder: object, **_kw: object) -> list[object]:
+        claimed["pid"] = process_control.read_pid(pid_path)
+        return []
+
+    monkeypatch.setattr(cli, "watch_loop", fake_loop)
+
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 0
+    assert claimed["pid"] != 999111  # the stale record was replaced by this daemon's own
+    assert not pid_path.exists()
+
+
 def test_watch_writes_then_removes_pid_file(
     monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
 ) -> None:

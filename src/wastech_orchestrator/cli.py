@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -43,6 +44,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.cost_gap import cost_gaps, render_cost_gap
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.hitl import iter_task_interactions
 from wastech_orchestrator.core.loop_control import ExhaustedLoop
@@ -114,7 +116,12 @@ from wastech_orchestrator.security.isolation import (
     describe_host_floor,
 )
 from wastech_orchestrator.security.launchers import Which, resolve_launcher
-from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
+from wastech_orchestrator.state_store import (
+    IncompatibleStateError,
+    ProviderAttemptRow,
+    StateStore,
+    TaskRow,
+)
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import (
     read_subtask_refs,
@@ -1360,6 +1367,19 @@ def _executor_alive(config: OrchestratorConfig) -> bool:
     return _daemon_alive(config) or _runner_alive(config)
 
 
+def _runner_owner_note(pid: int) -> str:
+    """How to get a live ``run`` executor out of the way — it can only be waited out.
+
+    ``run`` installs no stop wiring, so the only honest instruction is to wait for it to finish or
+    interrupt it where it runs. Shared by the pre-flight owner check and the exclusive claim that
+    backs it up, so an operator reads one sentence whichever of the two refused.
+    """
+    return (
+        f"a 'run' is executing a task in this clone (pid {pid}); wait for it to finish, "
+        "or interrupt it where it runs"
+    )
+
+
 def _executor_owner(config: OrchestratorConfig) -> str | None:
     """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
 
@@ -1383,10 +1403,7 @@ def _executor_owner(config: OrchestratorConfig) -> str | None:
         )
     runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
     if runner is not None:
-        return (
-            f"a 'run' is executing a task in this clone (pid {runner}); wait for it to finish, "
-            "or interrupt it where it runs"
-        )
+        return _runner_owner_note(runner)
     return None
 
 
@@ -1400,6 +1417,11 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
+
+    A ``done`` task whose run had a fix loop stopped by a guard says so. It succeeded and is not
+    failing on anything — its failure artifacts were retired at the terminal — but a run that needed
+    a loop cut short is worth a second look, and the alternative was leaving the reader to infer it
+    from a stale report path.
     """
     if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
@@ -1407,6 +1429,8 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
         if row.blocked_until:
             return f"{row.status.value} (paused until {row.blocked_until})"
         return f"{row.status.value} (paused)"
+    if row.status is Status.DONE and row.recovered_loop:
+        return f"{row.status.value} (recovered: {row.recovered_loop})"
     return row.status.value
 
 
@@ -2026,6 +2050,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     # is a controlled refusal with a non-zero exit; a malformed file falls through to the gate.
     scan = _scan_pending_meta(Path(args.task_file))
     task_id, depends_on = scan.task_id, scan.depends_on
+    if task_id is not None and orchestrator.settled_own_file(task_id, args.task_file):
+        # The same guard `watch` applies, for the same reason: re-running a terminal task's own
+        # leftover file would reject it as a duplicate id and quarantine the operator's own file
+        # under the private home. Resolving it (`rerun` / `finalize`) is the operator's call.
+        print(
+            f"run: {task_id} already reached a terminal; its task file was left in place. "
+            "Use `worc rerun` to re-attempt it, or `worc finalize` to close it out.",
+            file=sys.stderr,
+        )
+        return 1
     if task_id is not None and depends_on:
         verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending={})
         if verdict.state is not Eligibility.ELIGIBLE:
@@ -2036,7 +2070,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
     # crash would refuse those commands forever.
     runner_path = process_control.runner_file_path(worc_home_for(config))
-    process_control.write_pid_file(runner_path)
+    try:
+        # An exclusive claim, not a recording: the owner check above is separated from this line by
+        # the engine build and the dependency scan, and two `run`s that both saw the slot free in
+        # that window would both proceed — the loser's marker overwritten, after which `stop`
+        # addresses the wrong process. The check stays for the better message in the common case;
+        # the kernel decides the race.
+        process_control.write_pid_file(runner_path, exclusive=True)
+    except process_control.ExecutorBusyError as busy:
+        print(f"run: {_runner_owner_note(busy.pid)}")
+        return 1
     try:
         result = orchestrator.run_task(args.task_file)
     finally:
@@ -2051,6 +2094,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         # sees WHICH front-matter field and WHY without opening the JSON validation report.
         detail = f" ({result.validation_detail})" if result.validation_detail else ""
         print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
+        if result.quarantine_path:
+            # The quarantine is under the private home, which the operator does not browse and
+            # agents cannot read. Where their file went has to come from the command's output.
+            print(f"  moved to {Path(result.quarantine_path).as_posix()}", file=sys.stderr)
         return _EXIT_BY_STATUS.get(result.final_status, 1)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
@@ -2592,6 +2639,12 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
     except (PipelineFailed, GitCommandError) as exc:
         print(f"merge-task: {exc}")
         return 1
+    except ManualActionRequired as exc:
+        # A merge that stopped for a human (a staging gate, a merge-flow node, a conflicted path
+        # carrying no decision) keeps its own class: exit 2, not the 1 an ordinary failure gets.
+        # `main`'s handler would also print it, but without the prefix every other line here has.
+        print(f"merge-task: manual action required — {exc}")
+        return 2
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (merged)")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
@@ -3542,9 +3595,11 @@ def run_preflight(
 
     # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
     # is missing either way, and refusing to run would leave the operator without the guarantee AND
-    # without the work. The same text lands in the run log, from the same formatter.
+    # without the work. One status line per provider, in the shape of the two above it (subject,
+    # verdict, cause) rather than the paragraph it used to print — what the missing floor costs is
+    # `guide/config/security.md`'s job. The same text lands in the run log, from the same formatter.
     floor_gaps = describe_host_floor(config, HOST_FLOOR_CHECKS)
-    lines.extend(f"isolation-floor: NONE — {gap}" for gap in floor_gaps)
+    lines.extend(f"isolation-floor: NONE ({gap})" for gap in floor_gaps)
     # The price of keeping that verdict advisory: "a node can still fall back to the other
     # provider" is the compensation that makes it advisory, and it does not exist when only one
     # provider is allowed. Under strict isolation the attempt that needs a sandboxed shell is then
@@ -3710,7 +3765,9 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             for violation in violations:
                 print(violation if violation.startswith(" ") else f"  {violation}")
         for warning in check.warnings:
-            print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
+            # Each warning carries its own consequence: the lints report different problems, so a
+            # single shared suffix would be wrong for all but one of them.
+            print(f"flow {check.name}: WARN — {warning}")
     return 0 if ok else 1
 
 
@@ -3775,6 +3832,18 @@ def _summarize_watch(results: list[PipelineResult], *, withheld: Sequence[str] =
         )
         print(f"{result.task_id}: {label}")
     return max(_EXIT_BY_STATUS.get(r.final_status, 1) for r in results)
+
+
+def _watcher_busy_note(pid: int, pid_path: Path) -> str:
+    """The refusal a second watcher gets: who holds this artifact root, and the two ways out.
+
+    Shared by the pre-flight check and the exclusive claim that backs it up, so the wording does not
+    depend on which of the two caught the collision.
+    """
+    return (
+        f"watch: already running (pid {pid}); stop it first with "
+        f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+    )
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -3844,10 +3913,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # overwritten on start.
     existing = process_control.running_daemon_pid(pid_path)
     if existing is not None:
-        print(
-            f"watch: already running (pid {existing}); stop it first with "
-            f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
-        )
+        print(_watcher_busy_note(existing, pid_path))
         return 1
     # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
     # covered by the PID file above and cannot be stopped by the advice that goes with it.
@@ -3885,15 +3951,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
     results: list[PipelineResult] = []
     daemon_notes = WatchNotes()
     stopped = False
+    claimed = False
     try:
         with controller:
+            # Claim the root before anything else in this block: the check above is separated from
+            # here by the engine build and the console print, so two daemons that both saw it free
+            # in that window would both proceed, the loser's marker overwritten. It is also why the
+            # claim comes first — the sentinel, the children file and the reaping below all belong
+            # to whoever holds the marker, and a refusal must leave the live daemon's files alone.
+            try:
+                process_control.write_pid_file(pid_path, exclusive=True)
+            except process_control.ExecutorBusyError as busy:
+                print(_watcher_busy_note(busy.pid, pid_path))
+                return 1
+            claimed = True
             # Lead our own process group (POSIX, best-effort) so `stop --force-full` can group-kill
             # the daemon without reaching an unrelated group. No-op if we already lead one
             # (foreground job control / console spawn) or on Windows.
             process_control.ensure_own_process_group()
             stop_path.unlink(missing_ok=True)  # clear a stale sentinel so it can't stop us on start
             process_control.clear_children_file(children_path)  # clear a stale handle from a crash
-            process_control.write_pid_file(pid_path)
             results = watch_loop(
                 orchestrator,
                 config,
@@ -3910,16 +3987,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print("watch: stopped")
         return 0
     finally:
-        # Reap the active agent's whole subtree before dropping the PID file — closes the main
-        # orphan route (Ctrl-C / crash / clean exit). A soft stop lets the stage finish, so on_reap
-        # already cleared the handle and this is a no-op; a --force-full from another shell already
-        # reaped it.
-        handle = process_control.read_children_record(children_path)
-        if handle is not None:
-            agent_process.kill_agent_subtree(handle.pid, handle.pgid)
-        process_control.clear_children_file(children_path)
-        pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
-        stop_path.unlink(missing_ok=True)  # reap our own sentinel
+        # Only the holder cleans up: a refused claim must not reap the live daemon's agent or drop
+        # its marker and sentinel. Reap the active agent's whole subtree before dropping the PID
+        # file — closes the main orphan route (Ctrl-C / crash / clean exit). A soft stop lets the
+        # stage finish, so on_reap already cleared the handle and this is a no-op; a --force-full
+        # from another shell already reaped it.
+        if claimed:
+            handle = process_control.read_children_record(children_path)
+            if handle is not None:
+                agent_process.kill_agent_subtree(handle.pid, handle.pgid)
+            process_control.clear_children_file(children_path)
+            pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
+            stop_path.unlink(missing_ok=True)  # reap our own sentinel
     if stopped:
         print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0
@@ -4200,6 +4279,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 latest = store.latest_task()
                 tasks = [] if latest is None else [latest]
         current_nodes = {t.task_id: store.get_flow_checkpoint(t.task_id)[0] for t in tasks}
+        cost_notes = {t.task_id: _cost_gap_note(store, (t.task_id,)) for t in tasks}
     finally:
         store.close()
 
@@ -4229,6 +4309,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             updated = datetime.fromisoformat(task.updated_at)
             elapsed = max(0.0, (now - updated).total_seconds())
             print(f"elapsed_since_update_seconds={elapsed:.1f}")
+        cost_note = cost_notes.get(task.task_id)
+        if cost_note:
+            # Not a cost report — this command prints no total. It is the other half of one: the
+            # attempts whose price is not in ``state.db`` at all, named so a later roll-up over
+            # these rows is not read as the task's whole bill.
+            print(f"cost_not_accounted={cost_note}")
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
 
@@ -4750,6 +4836,41 @@ def _list_sections(
     ]
 
 
+def _section_task_ids(
+    sections: list[tuple[str, list[dict[str, str | None]]]],
+) -> tuple[str, ...]:
+    """Every distinct task id a listing view showed, in a stable order.
+
+    A pending or gate-rejected entry carries an id with no ``tasks`` row behind it; those simply
+    contribute no attempts, so they need no filtering here.
+    """
+    seen: dict[str, None] = {}
+    for _name, items in sections:
+        for entry in items:
+            task_id = entry.get("task_id")
+            if task_id:
+                seen.setdefault(task_id, None)
+    return tuple(seen)
+
+
+def _cost_gap_note(store: StateStore | None, task_ids: Sequence[str]) -> str | None:
+    """The "what this cost does not cover" sentence for *task_ids*, or ``None``.
+
+    Read-only and best-effort: a listing must not fail over an advisory line, so a store error
+    yields no note rather than an error. One query per task — these views show tens of rows, not
+    thousands, and the alternative is a bespoke aggregate for a footer.
+    """
+    if store is None or not task_ids:
+        return None
+    rows: list[ProviderAttemptRow] = []
+    try:
+        for task_id in task_ids:
+            rows.extend(store.get_provider_attempts_for_task(task_id))
+    except sqlite3.Error:
+        return None
+    return render_cost_gap(cost_gaps(rows))
+
+
 def _list_ids(store: StateStore | None, scope: str | None) -> int:
     """Print bare task ids (one per line, stdout) for completion/scripting.
 
@@ -4819,6 +4940,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 return _print_section_ids(_list_sections(args, config, store))
             return _list_ids(store, args.scope)
         sections = _list_sections(args, config, store)
+        cost_note = _cost_gap_note(store, _section_task_ids(sections))
     finally:
         if store is not None:
             store.close()
@@ -4840,6 +4962,12 @@ def cmd_list(args: argparse.Namespace) -> int:
                 print(f"  {_entry_line(entry)}")
         else:
             print("  (none)")
+    if cost_note:
+        # A footer, once, over the tasks this view listed: the provider calls whose cost the
+        # database does not hold. Table view only — the json/ids views are machine surfaces and
+        # gain nothing from prose (``summary.json`` carries the same fact per task, structured).
+        print()
+        print(f"note: {cost_note}")
     return 0
 
 

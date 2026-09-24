@@ -72,6 +72,12 @@ _TERMINAL_REASON_PROSE: dict[str, str] = {
         "output without editing the tree, so the loop was cut short of max_fix_cycles; check the "
         "latest fixing output and the review findings for what blocked progress"
     ),
+    "repeated_findings": (
+        "the same node returned an identical set of findings for consecutive rounds — the fixer "
+        "kept working and the verdict never moved, so the loop was cut short of its budget; read "
+        "the repeated finding first, because a request the node cannot satisfy (an input it may "
+        "not edit, a judgement the flow cannot meet) never converges however many rounds it gets"
+    ),
     "max_fix_cycles": (
         "the review/fix loop hit its per-loop cap (max_fix_cycles) without the reviewer accepting"
     ),

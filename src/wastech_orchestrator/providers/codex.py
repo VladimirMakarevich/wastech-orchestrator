@@ -617,13 +617,7 @@ def host_floor_gap(*, strict_isolation: bool, system: str | None = None) -> str 
     del strict_isolation  # see above: Codex's floor does not move with the mode
     if (system if system is not None else default_host_system()) != "Windows":
         return None
-    return (
-        "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "
-        "elevated sandbox backend, which cannot be classified offline — run "
-        "`worc preflight` (it runs the capability smoke) to get the answer before a task does. An "
-        "undemonstrable sandbox is a warning under strict_isolation: false (the run continues, "
-        "unproven) and refuses the attempt under strict_isolation: true"
-    )
+    return "native Windows — sandbox not classifiable offline, `worc preflight` probes it"
 
 
 def attempt_has_shell(config: ProviderConfig, query: ShellQuery) -> bool:

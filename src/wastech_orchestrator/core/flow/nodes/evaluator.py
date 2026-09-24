@@ -49,7 +49,9 @@ from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutc
 from wastech_orchestrator.core.flow.nodes.base import (
     EvaluatorInfraError,
     NodeInputs,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     assert_exchange_unchanged,
@@ -154,7 +156,8 @@ class EvaluatorNodeRunner:
         assert isinstance(node, EvaluatorNode)
         route = self._s.router.resolve_route(node.id, node.provider)
         started_at = self._s.clock()
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -165,8 +168,20 @@ class EvaluatorNodeRunner:
                 route_fallback=route.fallback.value if route.fallback else None,
                 route_source=route.source.value,
                 started_at=started_at,
-            )
-        )
+            ),
+        ) as run:
+            return self._evaluate(node, ctx, route, run, started_at)
+
+    def _evaluate(
+        self,
+        node: EvaluatorNode,
+        ctx: NodeContext,
+        route: ResolvedRoute,
+        run: NodeRun,
+        started_at: str,
+    ) -> NodeResult:
+        """Build the request, run the lens, and record its verdict — inside the row's lifetime."""
+        run_id = run.id
         lineage = self._resume_node_lineage(node, ctx, route)
         baseline = deserialize_usage(lineage.usage_snapshot) if lineage else None
         session_id = lineage.raw_session_id if lineage else None
@@ -200,7 +215,7 @@ class EvaluatorNodeRunner:
         )
         gating = self._gating_flags(node, raw_findings)
         kind, rework_exhausted = self._verdict(node, ctx, outcome, raw_findings, gating)
-        self._record_completion(run_id, outcome, kind)
+        self._record_completion(run, outcome, kind)
         record_run_observability(
             self._s,
             task_id=ctx.task_id,
@@ -458,6 +473,7 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            conflicts_path=self._in.conflicts_path,
             # On a rework re-entry, hand the reviewer the previous author node's report so it
             # judges "was the finding addressed" with the implementer's account (including a stated
             # blocker) in hand, not the diff alone. ``None`` on the first pass (no prior report).
@@ -638,7 +654,7 @@ class EvaluatorNodeRunner:
             extra_secrets=self._s.prompt_secrets,
         )
 
-    def _record_completion(self, run_id: int, outcome: StageOutcome, kind: str) -> None:
+    def _record_completion(self, run: NodeRun, outcome: StageOutcome, kind: str) -> None:
         result = outcome.result
         status = result.status.value if result is not None else "failed"
         error_class = None
@@ -646,14 +662,12 @@ class EvaluatorNodeRunner:
             error_class = result.error.error_class.value
         elif result is None and outcome.terminal_error is not None:
             error_class = outcome.terminal_error.error_class.value
-        self._s.store.complete_node_run(
-            run_id,
+        run.complete(
             status=status,
             outcome=kind,
             provider_used=outcome.provider_used.value if outcome.provider_used else None,
             error_class=error_class,
             stage_attempts=outcome.stage_attempts,
-            finished_at=self._s.clock(),
         )
 
     @staticmethod

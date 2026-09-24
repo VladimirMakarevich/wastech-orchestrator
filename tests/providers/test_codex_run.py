@@ -588,6 +588,41 @@ def test_successful_run(
         assert (attempt / name).exists(), name
 
 
+def test_result_json_names_the_effective_model_and_reasoning(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # P1.6: the machine-readable outcome says what it ran on. Resolved through the same
+    # ProviderConfig accessors the argv builder uses, so the record cannot describe a launch that
+    # did not happen — and it survives with ``prompt_audit`` off, which is the default.
+    config = replace(codex_config, model="gpt-5.6-sol", reasoning="high")
+    fake = FakeRun(stdout=_success_stream())
+    result = _provider(config, security_config, tmp_path, fake).run(make_request())
+
+    assert (result.model, result.reasoning) == ("gpt-5.6-sol", "high")
+    written = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
+    assert written["model"] == "gpt-5.6-sol"
+    assert written["reasoning"] == "high"
+
+
+def test_result_json_names_the_model_on_a_failed_attempt(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A failing attempt is exactly the one a post-mortem opens, so it carries the model too.
+    config = replace(codex_config, model="gpt-5.6-sol", reasoning="high")
+    fake = FakeRun(timed_out=True)
+    with pytest.raises(ProviderError):
+        _provider(config, security_config, tmp_path, fake).run(make_request())
+    written = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
+    assert written["model"] == "gpt-5.6-sol"
+    assert written["reasoning"] == "high"
+
+
 def test_schema_requested_structured_output_from_last_message(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
@@ -826,7 +861,7 @@ def test_artifact_level_minimal_prunes_on_success(
     provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "minimal")
     provider.run(make_request())
     survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
-    assert survivors == {"result.json"}
+    assert survivors == {"result.json", "request.json"}
 
 
 def test_artifact_level_minimal_is_strict_on_failure(
@@ -836,13 +871,14 @@ def test_artifact_level_minimal_is_strict_on_failure(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
     # A timeout raises, but _finalize_failure still writes result.json and then prunes — minimal is
-    # strict: only result.json survives, even on failure (it carries the exit code + error class).
+    # strict: only the outcome (exit code + error class) and what was requested to produce it
+    # survive, even on failure.
     fake = FakeRun(timed_out=True)
     provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "minimal")
     with pytest.raises(ProviderError):
         provider.run(make_request())
     survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
-    assert survivors == {"result.json"}
+    assert survivors == {"result.json", "request.json"}
     result_json = json.loads((_attempt_dir(tmp_path) / "result.json").read_text(encoding="utf-8"))
     assert result_json["error"]["error_class"] == "timeout"
 
@@ -857,7 +893,7 @@ def test_artifact_level_standard_keeps_stdout_stderr_result(
     provider = _provider_at_level(codex_config, security_config, tmp_path, fake, "standard")
     provider.run(make_request())
     survivors = {p.name for p in _attempt_dir(tmp_path).iterdir()}
-    assert survivors == {"result.json", "stdout.log", "stderr.log"}
+    assert survivors == {"result.json", "request.json", "stdout.log", "stderr.log"}
 
 
 def test_prompt_is_delivered_via_stdin_not_argv(

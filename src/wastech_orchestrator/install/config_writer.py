@@ -57,7 +57,7 @@ _FOOTER = (
     "# config.example.yaml when you want to change one:\n"
     "#   orchestrator  poll_interval_seconds, queue, auto_mode.confirm_next_task +\n"
     "#                 confirm_timeout_s\n"
-    "#   repo          branch_prefix, branch_mode, checkout_base_on_cleanup\n"
+    "#   repo          branch_prefix, branch_mode, checkout_base_on_cleanup, governance_paths\n"
     "#   agents        the fix budgets, decomposition, retry, and the per-provider command /\n"
     "#                 timeout_seconds / permission_profile / extra_args / max_turns\n"
     "#   security      allowed_environment (resolved per OS at load), extra_environment,\n"

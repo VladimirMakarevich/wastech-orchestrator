@@ -34,6 +34,7 @@ from wastech_orchestrator.core.flow.nodes import (
     PublishConfigError,
     PublishNodeRunner,
 )
+from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import (
     AgentNode,
@@ -4711,3 +4712,53 @@ def test_allow_skills_true_without_names_turns_them_on(tmp_path: Path) -> None:
 
     assert router.requests[0].allow_skills is True
     assert router.requests[0].required_skills == ()
+
+
+# -- the node_runs row's lifetime (P1.10) -------------------------------------
+
+
+def test_a_node_stopped_before_its_provider_call_still_closes_its_row(tmp_path: Path) -> None:
+    # The general form of the defect, not the merge flow's instance of it: everything between the
+    # row's reservation and `run_stage` — resume resolution, request building, the containment
+    # assertion, the integrity brackets — can raise, and the task driver's terminal is not on every
+    # path that follows. The row must not be left `running` with a NULL `finished_at`, which no
+    # reader can tell from a node still executing.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="work", kind="agent", role_file="r.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+
+    def _breach(request: Any, exchange_root: str) -> None:
+        raise NodeManualRequired("exchange containment violation: a private path reached a request")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("wastech_orchestrator.core.flow.nodes.agent.assert_request_contained", _breach)
+        with pytest.raises(NodeManualRequired):
+            AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert not router.requests  # it really stopped before the provider call
+    closed = store.completed[-1]
+    assert closed["status"] == "aborted" and closed["finished_at"] == "ts"
+    assert "containment violation" in closed["abort_reason"]
+
+
+def test_a_node_that_recorded_its_own_outcome_is_not_reclosed(tmp_path: Path) -> None:
+    # The guard closes an ABANDONED row, never a finished one: an exception raised after the node
+    # recorded its verdict (the dangerous-diff gate, an evaluator's fail-closed) must not overwrite
+    # that verdict with `aborted`.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(id="work", kind="agent", role_file="r.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise NodeManualRequired("a dangerous diff needs a human")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("wastech_orchestrator.core.flow.nodes.agent.assert_exchange_unchanged", _boom)
+        with pytest.raises(NodeManualRequired):
+            AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert len(store.completed) == 1  # closed once, by the node's own completion
+    assert store.completed[-1]["status"] == "succeeded"
+    assert store.completed[-1].get("abort_reason") is None

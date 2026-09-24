@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from wastech_orchestrator.core.cost_gap import CostGap
 from wastech_orchestrator.core.flow.recorder import StepFacts
 from wastech_orchestrator.core.follow_ups import FollowUp
 from wastech_orchestrator.core.summary_report import (
@@ -46,6 +47,9 @@ def _step(node_id: str, kind: str = "agent", **kwargs) -> StepFacts:
         "started_at": "2026-01-01T00:00:00+00:00",
         "finished_at": "2026-01-01T00:01:00+00:00",
         "message": None,
+        "tool_data": None,
+        "tool_stdout": None,
+        "findings": None,
     }
     return StepFacts(**{**defaults, **kwargs})
 
@@ -276,6 +280,7 @@ def _write(tmp_path: Path, **kwargs) -> dict:
         "task_ref": None,
         "degraded": False,
         "supervisor_usage": None,
+        "cost_gaps": (),
     }
     write_summary_report(tmp_path, _facts(), **{**defaults, **kwargs})
     path = task_artifact_dir(tmp_path, _TASK) / SUMMARY_JSON_FILENAME
@@ -297,6 +302,20 @@ def test_summary_json_carries_no_spend_when_the_layer_never_ran(tmp_path: Path) 
     # This is how an operator tells "the layer is switched off" from "it ran and could not finish".
     assert "supervisor_usage" not in _write(tmp_path)
     assert "degraded" not in _write(tmp_path)
+    # A fully priced run has no gap to state, so the key is absent rather than empty.
+    assert "cost_not_accounted" not in _write(tmp_path)
+
+
+def test_summary_json_names_what_the_cost_does_not_cover(tmp_path: Path) -> None:
+    # P1.7: the gap travels with the spend, so the figure above it is never read as the whole bill.
+    data = _write(
+        tmp_path,
+        supervisor_usage={"total": {"cost": 15.81}},
+        cost_gaps=(CostGap(provider="codex", attempts=13, input_tokens=8_400_000),),
+    )
+    assert data["cost_not_accounted"] == [
+        {"provider": "codex", "attempts": 13, "input_tokens": 8_400_000}
+    ]
 
 
 def test_summary_json_records_the_layers_spend_and_the_degradation(tmp_path: Path) -> None:

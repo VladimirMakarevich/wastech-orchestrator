@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_facts, read_final_diff
-from wastech_orchestrator.providers.artifacts import exchange_node_run_dir, exchange_task_dir
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
 
 # --- Bounds --------------------------------------------------------------------------------------
@@ -48,6 +48,17 @@ _DIFF_INLINE_MAX = 4_000
 #: Longest per-step message. The SAME cap applies to the observation prompt's ``final_message``
 #: (:func:`bound_step_message`), so a chatty node cannot inflate every observe turn without limit.
 _STEP_MESSAGE_MAX = 500
+#: Longest rendered ``data`` object a ``tool`` step carries. Its own cap, not the message's: a gate
+#: reports measurements the summary has to name, and a tool free to report anything is exactly the
+#: thing that would otherwise inflate every packet in the run.
+_STEP_DATA_MAX = 1_000
+#: Longest head of a ``tool`` step's redacted stdout. Smaller than the others because it is the
+#: least structured of the three and the one a chatty program grows without bound; the full stream
+#: stays on disk under the run directory.
+_STEP_STDOUT_MAX = 800
+#: Longest per-step evaluator findings. The largest cap of the three: a lens with ten rework rounds
+#: is the case this exists for, and its findings are what the pull-request body is written from.
+_STEP_FINDINGS_MAX = 2_000
 #: Longest rendered observation digest; the oldest lines are dropped and the remainder is marked.
 _OBSERVATIONS_MAX = 8_000
 
@@ -62,16 +73,25 @@ _DIFF_OLD_PATH_RE = re.compile(r"^--- a/(.*)$")
 _DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
 
 
+def _bounded(text: str, limit: int) -> str:
+    """*text* stripped and truncated to *limit* characters, marked with an ellipsis when cut.
+
+    The one truncation used by every bounded step field, so each field differs only in the number
+    beside :data:`_STEP_MESSAGE_MAX` that it passes here.
+    """
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[: limit - 1].rstrip() + _ELLIPSIS
+
+
 def bound_step_message(text: str) -> str:
     """Truncate a node's own closing message to the recorded per-step cap, with an ellipsis.
 
     Shared by the packet's ``steps[].message`` and the per-step observation prompt so the cap is
     stated once rather than drifting between the two surfaces.
     """
-    stripped = text.strip()
-    if len(stripped) <= _STEP_MESSAGE_MAX:
-        return stripped
-    return stripped[: _STEP_MESSAGE_MAX - 1].rstrip() + _ELLIPSIS
+    return _bounded(text, _STEP_MESSAGE_MAX)
 
 
 @dataclass(frozen=True)
@@ -82,8 +102,12 @@ class PacketFacts:
     formatted here. It is built from the node runs and their own output files rather than from
     observations, so a packet stays complete when the observation cadence is turned down or off.
 
-    ``diff_path`` / ``findings_path`` are repo-relative POSIX paths to the **exchange** copies — the
-    only copies the provider may read. ``None`` when the run produced no such artifact.
+    ``diff_path`` / ``findings_path`` are repo-relative POSIX paths to the **private** copies under
+    ``.worc/logs/<task>/``, and they are for the human reading the post-mortem, not for the agent:
+    the private read-deny projection keeps that tree closed to a provider at either value of
+    ``security.disable_read_isolation``, while the exchange copies these once named are removed by
+    terminal cleanup. What an agent can act on is inline on the steps. ``None`` when the run
+    produced no such artifact, or when the private tree lies outside the repository.
     """
 
     task_id: str
@@ -124,7 +148,6 @@ def build_packet_facts(
     flow_name: str | None,
     evaluations: Sequence[EvaluationRow],
     artifacts_root: str | Path,
-    exchange_root: str | Path,
     repo_dir: str | Path,
     material_observations: str | None = None,
 ) -> PacketFacts:
@@ -148,27 +171,25 @@ def build_packet_facts(
         task_title=task_title,
         task_type=task_type,
         flow_name=flow_name,
-        steps=collect_step_facts(node_runs, artifacts_root, task_id),
+        steps=collect_step_facts(node_runs, artifacts_root, task_id, evaluations),
         check_runs=tuple(store.get_check_runs(task_id)),
         diff_text=read_final_diff(artifacts_root, task_id),
-        diff_path=_exchange_relpath(exchange_root, repo_dir, task_id, "current.diff"),
-        findings_path=_findings_relpath(exchange_root, repo_dir, task_id, evaluations),
+        diff_path=_private_relpath(
+            repo_dir, task_artifact_dir(artifacts_root, task_id) / "current.diff"
+        ),
+        findings_path=_findings_relpath(artifacts_root, repo_dir, task_id, evaluations),
         material_observations=material_observations,
     )
 
 
-def _exchange_relpath(
-    exchange_root: str | Path, repo_dir: str | Path, task_id: str, relname: str
-) -> str | None:
-    """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
+def _private_relpath(repo_dir: str | Path, path: Path) -> str | None:
+    """A repo-relative POSIX path to an existing private artifact, or ``None``.
 
-    Repo-relative because the provider's working directory *is* the repository, and because an
-    absolute path inside the packet would make the bytes machine-dependent.
-    Only the exchange copy is ever named — it is the only copy the provider may read.
+    Repo-relative and never absolute, because an absolute path inside the packet would make the
+    bytes machine-dependent and break the byte-identity contract. The private tree normally lives at
+    ``<repo>/.worc``; an operator who moved it outside the repository gets ``None`` rather than a
+    machine-specific string, and the inline step fields carry the content either way.
     """
-    if not exchange_root:
-        return None
-    path = exchange_task_dir(exchange_root, task_id) / relname
     if not path.is_file():
         return None
     try:
@@ -178,26 +199,26 @@ def _exchange_relpath(
 
 
 def _findings_relpath(
-    exchange_root: str | Path,
+    artifacts_root: str | Path,
     repo_dir: str | Path,
     task_id: str,
     evaluations: Sequence[EvaluationRow],
 ) -> str | None:
-    """The latest in-flow evaluator verdict's published ``findings.json``, or ``None``.
+    """The latest in-flow evaluator verdict's private ``findings.json``, or ``None``.
 
     The verdict rows are insertion-ordered, so the last one is the most recent; its
-    ``(node_id, source_node_run_id)`` rebuilds the per-run path the evaluator published under.
+    ``(node_id, source_node_run_id)`` rebuilds the per-run directory the evaluator wrote under. One
+    path for a whole run is deliberately not the record of what the lenses found — that is on each
+    step — it is the entry point a person opens when they want more than the step carries.
     """
     verdicts = [row for row in evaluations if row.kind == "in_flow_verdict"]
-    if not verdicts or not exchange_root:
+    if not verdicts:
         return None
     last = verdicts[-1]
     if last.node_id is None or last.source_node_run_id is None:
         return None
-    run_dir = exchange_node_run_dir(exchange_root, task_id, last.node_id, last.source_node_run_id)
-    task_dir = exchange_task_dir(exchange_root, task_id)
-    relname = (run_dir.relative_to(task_dir) / "findings.json").as_posix()
-    return _exchange_relpath(exchange_root, repo_dir, task_id, relname)
+    run_dir = node_run_dir(artifacts_root, task_id, last.node_id, last.source_node_run_id)
+    return _private_relpath(repo_dir, run_dir / "findings.json")
 
 
 def render_packet(facts: PacketFacts) -> str:
@@ -289,8 +310,15 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
     written from. Only the keys a run actually has are emitted, so a clean step stays short — a
     blanket ``null`` per absent fact would inflate every packet and read as a recorded absence.
 
-    The message cap is applied here rather than in the record because it is a property of this
-    surface's size budget, not of what the node said.
+    Every cap is applied here rather than in the record because each is a property of this surface's
+    size budget, not of what the node said — see the constants beside :data:`_STEP_MESSAGE_MAX`.
+
+    ``data`` / ``stdout_head`` / ``findings`` are what a tool gate and an evaluator lens actually
+    reported, inline. They are the only form in which those verdicts reach the finalize turn: the
+    exchange copies are gone by the time anyone reads the packet, and the private tree the paths
+    name is read-denied to a provider at either value of ``security.disable_read_isolation``. Each
+    is rendered as bounded text rather than as a nested object, because the cap is a character cap
+    and half of a JSON object is not JSON.
     """
     rendered: list[dict[str, Any]] = []
     for facts in steps:
@@ -303,6 +331,7 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
             "started_at": facts.started_at,
             "finished_at": facts.finished_at,
         }
+        _label_unfinished_publish(step, facts)
         if facts.subtask_order is not None:
             step["subtask"] = facts.subtask_order
         if facts.provider_used:
@@ -317,8 +346,33 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
                 step["skip_reason"] = facts.skip_reason
         if facts.message and facts.message.strip():
             step["message"] = bound_step_message(facts.message)
+        if facts.tool_data and facts.tool_data.strip():
+            step["data"] = _bounded(facts.tool_data, _STEP_DATA_MAX)
+        if facts.tool_stdout and facts.tool_stdout.strip():
+            step["stdout_head"] = _bounded(facts.tool_stdout, _STEP_STDOUT_MAX)
+        if facts.findings and facts.findings.strip() not in ("", "[]", "{}"):
+            step["findings"] = _bounded(facts.findings, _STEP_FINDINGS_MAX)
         rendered.append(step)
     return rendered
+
+
+def _label_unfinished_publish(step: dict[str, Any], facts: StepFacts) -> None:
+    """Relabel the ``publish`` step the packet is built inside, so it is not read as a defect.
+
+    The packet is assembled by the publish node's own finalize hook, so that node's row is still
+    ``running`` by construction — every run, always. Left as ``status: running`` the finalize turn
+    read it as a fact worth reporting and wrote "the publish step is still recorded as running" into
+    the pull-request body: internal state, in text people read. The status becomes ``pending`` (it
+    is not running as far as this record can see — it had not started its work yet) and says so, so
+    a reader who meets it knows it is expected rather than inferring an incident.
+    """
+    if facts.node_kind != "publish" or facts.status != "running" or facts.finished_at:
+        return
+    step["status"] = "pending"
+    step["note"] = (
+        "expected: this packet is built by the publish step itself, before it runs — its outcome "
+        "is not part of the record and must not be described as unfinished work"
+    )
 
 
 @dataclass(frozen=True)

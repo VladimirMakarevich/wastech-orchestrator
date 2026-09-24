@@ -24,6 +24,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from wastech_orchestrator.core.cost_gap import CostGap, gap_json
 from wastech_orchestrator.core.flow.recorder import StepFacts
 from wastech_orchestrator.core.follow_ups import (
     FollowUp,
@@ -118,6 +119,7 @@ def write_summary_report(
     task_ref: str | None,
     degraded: bool,
     supervisor_usage: Mapping[str, Any] | None,
+    cost_gaps: Sequence[CostGap] = (),
 ) -> tuple[str, str]:
     """Write the deterministic ``summary.md`` + ``summary.json`` pair; return both paths.
 
@@ -126,6 +128,10 @@ def write_summary_report(
     ``summary.json`` is local-only metadata (never committed): the operator's copy of the follow-ups
     plus what the oversight layer spent, which belongs to whoever owns the bill rather than to the
     reviewer reading the change.
+
+    ``cost_gaps`` travels with the spend for that reason: the cost above it is summed from a column
+    one provider never fills, so the file states what the figure excludes instead of presenting a
+    partial total as the whole bill. Empty on a run whose every attempt was priced.
     """
     task_dir = task_artifact_dir(artifacts_root, facts.task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +140,7 @@ def write_summary_report(
         what=facts.task_title,
         follow_ups=follow_ups,
         supervisor_usage=supervisor_usage,
+        cost_gaps=cost_gaps,
         degraded=degraded,
     )
     body = render_summary_report(
@@ -155,6 +162,7 @@ def _write_summary_json(
     what: str,
     follow_ups: tuple[FollowUp, ...],
     supervisor_usage: Mapping[str, Any] | None,
+    cost_gaps: Sequence[CostGap],
     degraded: bool,
 ) -> None:
     """Write the deterministic ``summary.json``, one key set with the layer's own writer.
@@ -163,6 +171,8 @@ def _write_summary_json(
     report in ``summary.md`` *is* the artifact. ``supervisor_usage`` is present exactly when the
     layer made calls, so the pair answers both questions on its own: usage present means the layer
     ran, ``degraded`` means it ran and could not finish, and neither present means it never ran.
+    ``cost_not_accounted`` is present exactly when some attempt of the task carries no cost, and it
+    is what keeps any figure above it from being read as the run's whole bill.
 
     Best-effort like the rest of the summary path: a write error costs the metadata, never the
     terminal.
@@ -170,6 +180,8 @@ def _write_summary_json(
     payload: dict[str, Any] = {"what": what, "summary": ""}
     if supervisor_usage is not None:
         payload["supervisor_usage"] = dict(supervisor_usage)
+    if cost_gaps:
+        payload["cost_not_accounted"] = gap_json(cost_gaps)
     if follow_ups:
         payload["follow_ups"] = [follow_up_json(fu) for fu in follow_ups]
     if degraded:

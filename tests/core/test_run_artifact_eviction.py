@@ -39,6 +39,10 @@ class _Evictor:
     """A stand-in carrying exactly the attributes ``_evict_run_artifacts`` touches."""
 
     _evict_run_artifacts = Orchestrator._evict_run_artifacts
+    # The terminal footprint line is part of the same successful terminal (it says what the
+    # eviction kept), so the stand-in carries it rather than stubbing it out — that keeps these
+    # tests honest about what a real `done` prints.
+    _announce_terminal_footprint = Orchestrator._announce_terminal_footprint
     _log = Orchestrator._log
 
     def __init__(self, config: OrchestratorConfig, private_home: Path, store: _GuardStore) -> None:

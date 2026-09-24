@@ -19,7 +19,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # lower value loads, since every removed key is either tolerated-and-ignored or reported by name.
 # There is no migration runner: an installation that has drifted is repaired by ``upgrade-config``,
 # which merges the packaged template over the operator's file and stamps this value.
-CONFIG_SCHEMA_VERSION = 40
+CONFIG_SCHEMA_VERSION = 41
 
 
 class AuditBranch(StrEnum):
@@ -134,6 +134,18 @@ class RepoConfig:
     # including ``new``); ``True`` forces ``new`` and ``existing`` to return. ``current`` always
     # stays put regardless, since the operator owns its (possibly dirty) tree.
     checkout_base_on_cleanup: bool | None = None
+    # Repo-relative globs naming where THIS repository keeps its governance/rule content, ADDED to
+    # the orchestrator's own ``GOVERNANCE_PATH_GLOBS`` floor (``.agents/rules/**``) plus the root
+    # instruction files. A task whose diff touches any of them gets an operator notice — console/
+    # log, the pull-request summary, the ledger and Telegram — never a block.
+    #
+    # Additive only, and not by convention: the key has no syntax for an exclusion to be written in,
+    # and the validator refuses a value that tries to invent one (a leading ``!``, an absolute or
+    # traversing path). So the floor cannot be shrunk or switched off through configuration, which
+    # is the guarantee the constant exists for; what an operator can do is say where their own rules
+    # live, which worc has no way to guess. Empty (the default) = the floor alone, which is exactly
+    # today's behavior.
+    governance_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -561,7 +573,8 @@ class LoggingConfig:
     posture, so an absent ``logging`` block is as quiet as the one ``install`` used to write out.
     ``artifacts`` (``minimal|standard|full``) governs which per-attempt provider files survive under
     ``logs/<task-id>/stages/.../<attempt>-<provider>/``: ``minimal`` keeps only ``result.json``
-    (even on failure — ``result.json`` records the exit code + error class), ``standard`` adds
+    and ``request.json`` (even on failure — ``result.json`` records the exit code + error class,
+    ``request.json`` the redacted argv + permission profile it ran under), ``standard`` adds
     ``stdout.log``/``stderr.log``, ``full`` keeps everything. Prompt-audit is independent (governed
     by ``prompt_audit``); ``rendered-prompt.md`` and task-level artifacts are out of scope.
 
