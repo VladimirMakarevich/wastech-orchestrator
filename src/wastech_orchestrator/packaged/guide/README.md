@@ -106,7 +106,7 @@ Completeness (separate from rejection): if the task lacks acceptance criteria, i
 
 **You cannot.** The task packet is frozen at the moment the run starts, and every node reads the frozen copy — that is what makes a run reproducible, and what stops a node with write access from rewriting the instructions it is being judged against. Editing the file afterwards changes nothing about the run in progress.
 
-Because that used to happen in silence, the orchestrator now says so: on the next resume it compares your file against the frozen packet and, when they differ, prints a `WARNING` naming the instant the packet was frozen and stating that `worc stop` plus a fresh start is what applies the edit. The same sentence goes into `summary.md`, so it reaches the pull request rather than dying in a log. Expect the run to end `manual_action_required` in that case: the audit commit refuses to commit a lifecycle task file that no longer matches the packet the work was judged against.
+Because that used to happen in silence, the orchestrator now says so: on the next resume it compares your file against the frozen packet and, when they differ, prints a `WARNING` naming the instant the packet was frozen and stating that `worc stop` plus a fresh start is what applies the edit. The same sentence goes into `summary.md`, so it reaches the pull request rather than dying in a log. When the lifecycle tree is tracked in git (`--track-tasks`), expect the run to end `manual_action_required` in that case: the audit commit refuses to commit a lifecycle task file that no longer matches the packet the work was judged against.
 
 ## JSON tasks
 
