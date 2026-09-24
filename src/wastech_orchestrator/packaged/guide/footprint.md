@@ -125,7 +125,7 @@ worc runs clean --include-quarantine   # also take the tainted-exchange evidence
 
 The two commands keep disjoint territory: **`worc runs clean` handles `runs/`, `worc logs clean` handles `logs/`.** Per-task log dirs hold almost all of the disk (megabytes per task, against roughly 150 KB per task in `runs/`), and they are never removed automatically — reclaiming them stays an explicit decision.
 
-**Every successful task says this out loud, once.** At the terminal the orchestrator logs one line naming what it reclaimed, where this task's logs are, how big they are, and the command that takes them — plus `logging.artifacts: minimal`, because raw provider `stdout.log` is almost all of that size and dropping to `minimal` cuts it by roughly thirty times. It exists because "`clean_runs_on_success` worked" and "the logs are still there" are both true, and nobody was connecting them.
+**Every successful task says this once, at `info`.** At the terminal the orchestrator logs one line naming what it reclaimed, where this task's logs are, how big they are, and the command that takes them — plus `logging.artifacts: minimal`, because raw provider `stdout.log` is almost all of that size and dropping to `minimal` cuts it by roughly thirty times. It is an `info` record, so the shipped `logging.level: warning` filters it out — pass `worc --log-level info run …` (or set `logging.level: info`) to see it. It exists because "`clean_runs_on_success` worked" and "the logs are still there" are both true, and nobody was connecting them.
 
 ### The ledger is never capped
 
