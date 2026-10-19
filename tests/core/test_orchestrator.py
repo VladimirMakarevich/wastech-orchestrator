@@ -735,6 +735,139 @@ flow:
 """
 
 
+_PINNED_REVIEW_FLOW = _NON_BLOCKING_REVIEW_FLOW.replace(
+    "      max_rework_per_stage: 1\n", "      max_rework_per_stage: 1\n      provider: codex\n"
+)
+
+
+def test_a_pinned_provider_that_falls_back_is_loud_everywhere(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # `enrich-07b`: the critic was pinned to Codex so a second model would judge the material; Codex
+    # failed in one second on every pass and the stage quietly ran on Claude — a log line, nothing
+    # else. Now the operator hears it on the console and in Telegram, and the PR body says it.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.core.summary_report import PROVIDER_FALLBACKS_HEADING
+    from wastech_orchestrator.notify import TRACE_PROVIDER_FALLBACK
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_PINNED_REVIEW_FLOW, "utf-8")
+
+    providers = _both(
+        codex={"infra_fail": {"review"}, "infra_error_class": ErrorClass.PROCESS_CRASHED}
+    )
+    notifier = RecordingNotifier()
+    orch, _store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-pin"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # the result stands; it is the silence that changed
+    fallback_traces = [
+        c["outcome"]
+        for c in notifier.trace_calls
+        if c["node_id"] == "review" and c["outcome"].startswith(TRACE_PROVIDER_FALLBACK)
+    ]
+    assert fallback_traces and "codex" in fallback_traces[0] and "claude" in fallback_traces[0]
+    assert any("fallback provider" in m and "pinned" in m for m in messages)
+    body = (task_artifact_dir(art, "task-pin") / "summary.md").read_text(encoding="utf-8")
+    assert PROVIDER_FALLBACKS_HEADING in body
+    assert "`review`: routed to `codex` (pinned by the flow), ran on `claude`" in body
+    assert "`process_crashed`" in body
+
+
+_BLOCKING_ONE_ROUND_FLOW = _NON_BLOCKING_REVIEW_FLOW.replace(
+    "blocking: false", "blocking: true"
+).replace("review_fix: 5", "review_fix: 1")
+
+
+def test_the_ledger_names_where_this_run_stopped_not_where_an_earlier_one_did(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The finalize packet marks each earlier stop between the steps from these ledger fields. They
+    # must describe the run that is ending: after `rerun --continue` the task row still points at
+    # the previous attempt's failure report, and reading it named the wrong node and fix loop.
+    from wastech_orchestrator.core.decomposition import DecompositionDecision
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.core.loop_control import LoopCounters
+    from wastech_orchestrator.core.orchestrator import _Pipeline
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    for role in ("implementation", "review", "fixing"):
+        (flows / "roles" / f"{role}.md").write_text(f"{role}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_BLOCKING_ONE_ROUND_FLOW, "utf-8")
+    gating = {"findings": [{"severity": "high", "path": "feature.py", "what": "no", "fix": None}]}
+    providers = _both(outputs={"review": ("needs work", gating)})
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-stop"))
+    assert first.final_status is Status.MANUAL_ACTION_REQUIRED
+    record = ledger.records()[-1]
+    assert (record["stop_node"], record["stuck_loop"], record["stuck_limit"]) == (
+        "review",
+        "review_fix",
+        "max_fix_cycles",
+    )
+
+    # A later stop that is not a fix loop (an operator answer that never came, say) while the row
+    # still names the first report: this run's own reason is recorded, and the report is rewritten.
+    stale_report = store.get_task("task-stop").failure_report_path
+    pipeline = _Pipeline(
+        task=NormalizedTask(id="task-stop", title="T", description="d"),
+        task_file="task-stop.md",
+        status=Status.RUNNING,
+        counters=LoopCounters(),
+        decomposition=DecompositionDecision(accepted=False, reason="single unit", n=1),
+    )
+    orch._explain_terminal(pipeline, Status.MANUAL_ACTION_REQUIRED, "human input failed (timeout)")
+    orch._append_ledger(
+        pipeline, Status.MANUAL_ACTION_REQUIRED, pr_url=None, cleanup_safe=True, attempt=2
+    )
+    second = ledger.records()[-1]
+    assert second["stuck_loop"] is None
+    assert second["stuck_limit"] == "human input failed (timeout)"
+    report = json.loads(Path(stale_report).read_text(encoding="utf-8"))
+    assert report["limit_exhausted"] == "human input failed (timeout)"
+
+
 def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

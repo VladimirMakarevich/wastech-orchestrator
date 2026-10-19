@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import REWORK_OUTCOMES
+from wastech_orchestrator.core.flow.schema import REWORK_OUTCOMES, Edge
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, reachable_nodes
 
 #: Absent flow budget => only the config cap clamps (mirrors the engine's own ``_LARGE``).
@@ -131,9 +131,9 @@ def exhausted_fix_loops(
 ) -> list[ExhaustedLoop]:
     """Every named rework/fail loop reachable forward from ``start`` that is already at/over cap.
 
-    Mirrors the engine's own ``_charge_rework``/``_loop_cap`` check (a park always persists the
-    counter already at the cap value — the check bumps, then compares — so "already at or over cap"
-    is a plain current-state comparison, no bump simulation needed) but runs *before* a resume, from
+    Mirrors the engine's own :func:`rework_refusal` check (a park always persists the counter
+    already at the cap value — N fix rounds were charged and the next one refused — so "already at
+    or over cap" is a plain current-state comparison) but runs *before* a resume, from
     outside the engine, over the whole path a resumed run could retake — not just the resume node's
     own edge — so a downstream-already-exhausted loop is caught even when ``--from`` re-enters
     upstream of it.
@@ -148,6 +148,48 @@ def exhausted_fix_loops(
             if counter >= cap:
                 out.append(ExhaustedLoop(loop=edge.loop, node=node_id, counter=counter, cap=cap))
     return out
+
+
+@dataclass(frozen=True, slots=True)
+class ReworkRefusal:
+    """Why a rework/fail edge may not be taken right now: the loop it charges and the limit."""
+
+    loop: str | None
+    limit_name: str
+
+
+def rework_refusal(
+    snapshot: FlowSnapshot,
+    run_state: FlowRunState,
+    edge: Edge,
+    *,
+    max_fix_cycles: int,
+    max_total_fix_iterations: int,
+) -> ReworkRefusal | None:
+    """The limit that refuses one more fix round over ``edge``, or ``None`` when it may be taken.
+
+    A budget of N is N fix rounds: the edge is refused once its counter already holds N, before
+    anything is charged. Named loops, inline ``budget: N`` edges and the global backstop all read
+    the same way, so ``budgets: {sources_fix: 2}`` and ``budget: 2`` mean the same two rounds. The
+    per-loop / inline limit is reported before the global cap when both are reached.
+
+    Pure and side-effect free — the engine asks it before charging, and before running a node so a
+    non-blocking evaluator can accept instead of asking for a round that would be refused.
+    """
+    if edge.loop is not None:
+        cap = loop_cap(snapshot.doc.budgets, max_fix_cycles, edge.loop)
+        if run_state.counter(edge.loop) >= cap:
+            return ReworkRefusal(loop=edge.loop, limit_name="max_fix_cycles")
+    elif edge.budget is not None and run_state.counter(edge_key(edge)) >= edge.budget:
+        return ReworkRefusal(loop=None, limit_name=f"budget:{edge.from_node}->{edge.to}")
+    if run_state.fix_iterations >= global_cap(snapshot.doc.budgets, max_total_fix_iterations):
+        return ReworkRefusal(loop=edge.loop, limit_name="max_total_fix_iterations")
+    return None
+
+
+def edge_key(edge: Edge) -> str:
+    """Synthetic ``loop_counters`` key for an inline ``budget`` edge (no named loop)."""
+    return f"{edge.from_node}->{edge.to}:{edge.outcome}"
 
 
 def global_backstop_exhausted(

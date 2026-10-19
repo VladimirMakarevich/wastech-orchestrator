@@ -14,9 +14,11 @@ same as a provider that could not run the node at all. A **blocking** evaluator 
 every time it finds a blocking issue; the engine's named-loop budget bounds the rework cycles
 (exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
-(``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
-That budget-exhausted accept sets ``NodeOutcome.rework_exhausted`` so the orchestrator warns
-the operator (console + Telegram trace) the stage moved on with findings still open. Each pass
+(``max_rework_per_stage``) or the engine's budget for its rework edge (the named loop / inline
+budget, or the global backstop) is spent — whichever comes first — then takes the ``accept`` edge
+(-> continue), **never** manual. That budget-exhausted accept sets
+``NodeOutcome.rework_exhausted`` so the orchestrator warns the operator (console + Telegram trace)
+the stage moved on with findings still open. Each pass
 writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
 source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
 mutable counter, so the core stays domain-free (the cap is the node's declared
@@ -52,6 +54,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeRun,
     NodeServices,
     open_node_run,
+    provider_fallback_note,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     assert_exchange_unchanged,
@@ -288,6 +291,8 @@ class EvaluatorNodeRunner:
                 kind,
                 findings=findings,
                 rework_exhausted=rework_exhausted,
+                rework_limit=self._exhausted_limit(node, ctx) if rework_exhausted else None,
+                provider_fallback=provider_fallback_note(outcome),
                 unexpected_write=wrote,
                 git_control_drift=drift,
                 # Carry the provider's own prose, not just the typed findings. Without it the
@@ -426,14 +431,24 @@ class EvaluatorNodeRunner:
         # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows,
         # not a mutable counter — then accept (→ continue), never manual. The
         # core stays domain-free: the cap is the node's declared budget, not knowledge of the role.
+        # The engine's own limits bound it too: when the rework edge's loop budget (or the global
+        # backstop) is already spent the engine would refuse the round and park the task, which a
+        # non-blocking node must never do — so it accepts on whichever limit is reached first.
         prior_rework = self._s.store.count_rework_verdicts(
             ctx.task_id, node_id=node.id, subtask_order=ctx.subtask_order
         )
-        if prior_rework < node.max_rework_per_stage:
+        if prior_rework < node.max_rework_per_stage and ctx.rework_refusal is None:
             return "rework", False
         # Budget spent with a gating finding still open: accept and continue, but flag it so the
         # orchestrator warns the operator the stage moved on with work possibly left to do.
         return "accept", True
+
+    @staticmethod
+    def _exhausted_limit(node: EvaluatorNode, ctx: NodeContext) -> str:
+        """Which limit ended a non-blocking evaluator's rework rounds, for the operator warning."""
+        if ctx.rework_refusal is not None:
+            return ctx.rework_refusal
+        return f"max_rework_per_stage ({node.max_rework_per_stage}) spent"
 
     def _build_request(
         self,

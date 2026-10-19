@@ -1869,12 +1869,17 @@ def test_record_rework_single_increment() -> None:
 
 def test_evaluation_immutable_and_counted(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
+    for verdict in ("rework", "accept", "rework"):
+        # A verdict counts against the rework budget only while the node run it came from exists
+        # (a fresh rerun deletes them), so each verdict is attached to a real run row.
+        run_id = store.record_node_run(
+            NodeRunRow(task_id=_TASK, node_id="review", node_kind="evaluator", status="succeeded")
+        )
         store.record_evaluation(
             EvaluationRow(
                 task_id=_TASK,
                 node_id="review",
-                source_node_run_id=i,
+                source_node_run_id=run_id,
                 kind="in_flow_verdict",
                 verdict=verdict,
                 findings_json="[]",

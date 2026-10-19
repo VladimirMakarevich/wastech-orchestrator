@@ -10,8 +10,8 @@ For the fields not on this page see [reference.md](reference.md), which also car
 | --- | --- | --- | --- | --- |
 | `agents.allowed` | list of `claude` / `codex` | `[claude, codex]` | Each must be a known provider; must include the `primary` provider. | The providers this instance may launch. Keep it to what is actually installed. |
 | `agents.max_stage_attempts` | int | `3` | — | Provider attempts for one node before the stage fails, counting the cross-provider fallback hop (separate from `agents.retry`). |
-| `agents.max_fix_cycles` | int | `15` | — | Max iterations of a single fix loop (e.g. test → fixing → test). |
-| `agents.max_total_fix_iterations` | int | `30` | Must be `>= max_fix_cycles`. | Hard global cap across all fix loops and subtasks. |
+| `agents.max_fix_cycles` | int | `15` | — | Max fix rounds of a single fix loop (e.g. test → fixing → test): with `15`, fifteen rounds run and the sixteenth `fail`/`rework` parks the task. A flow's own `budgets` entry is clamped to it. |
+| `agents.max_total_fix_iterations` | int | `30` | Must be `>= max_fix_cycles`. | Hard global cap on fix rounds across all fix loops and subtasks. |
 
 ### `agents.decomposition` — split a task into subtasks
 
@@ -46,4 +46,12 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex ∈ `{minimal, low, medium, high, xhigh, max}` (`max`→`xhigh`). | Reasoning effort. A value valid for one provider may be invalid for the other. |
 | `.primary` | bool | `false` | **Exactly one** provider across the map must be `true`, and it must be in `agents.allowed`. | The global primary: runs every flow node with no explicit `provider`, and is the sole infrastructure-fallback target. |
 | `.max_turns_gate` | bool | `false` | **Requires `telegram.enabled: true`.** Claude-only. | `true` = hitting `max_turns` pauses for a Telegram continue/stop prompt (resumes the same session) instead of failing. Makes a low `max_turns` safe. |
+| `.background_tasks` | bool | `false` | Claude-only (an error on `codex`). | `false` launches the CLI with `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so the agent's subagents and shells run in the foreground (several launched in one message still run in parallel). In headless `-p` mode the CLI stops every background task when the agent ends its turn, so an agent that fans out in the background and then "waits for the results" ends the run with a promise instead of the work. Set `true` only if you need background tasks and your role prompts never end a turn waiting on them; `true` also removes the variable when your own environment exports it. |
 
+### What a Claude run is held to
+
+Three checks read the CLI's own `stream-json` output, whatever the node:
+
+- **Lost background work fails the attempt.** A run whose agent started backgrounded subagents that the CLI then stopped at exit (a `task_notification` ending `stopped`, or none at all) is raised as `background_work_lost` instead of being accepted as `done`, naming the stopped tasks. A subagent the agent stopped itself (`TaskStop`; the CLI counts it under `killed.parent`) was dropped on purpose and does not count, and a run whose CLI reports no system kills is never flagged. It is not fallback-eligible and does not park: an agent node fails, an evaluator goes to `manual_action_required`, and `rerun --continue` re-runs it. The attempt's cost is still recorded. With `background_tasks: false` (the default) the CLI cannot start such tasks at all; this is the backstop.
+- **An idle tail after the final result is cut.** When the stream's last event is a `result` with no background task — subagent or shell — still out, and the CLI then writes nothing and does not exit for 120 seconds, worc stops it and uses that result, with a warning saying so. A healthy run exits within a second of its result.
+- **Tokens and cost cover the whole session.** Token counts are read from the result's `modelUsage` — every model the session used, subagents included — the same scope as `total_cost_usd`. (The sibling `usage` covers only the main agent's last turn.)

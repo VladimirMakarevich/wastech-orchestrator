@@ -536,12 +536,16 @@ class AgentRouter:
                         },
                     )
                     break  # non-fallback infra error → terminal for this stage
-                log.info(
+                # A pinned provider is a decision the flow made on purpose (a second model as a
+                # cross-check); losing it is worth a warning, not a debug-level breadcrumb.
+                log_fallback = log.warning if route.source is RouteSource.FLOW_NODE else log.info
+                log_fallback(
                     "falling back",
                     extra={
                         "from": pid.value,
                         "to": next_pid.value,
                         "error_class": exc.error_class.value,
+                        "route_source": route.source.value,
                     },
                 )
                 if snapshot is not None and before is not None:

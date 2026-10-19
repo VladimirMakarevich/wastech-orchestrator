@@ -15,7 +15,7 @@ the report is testable without a run and cannot disagree with the database it ca
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -70,6 +70,49 @@ def summarize_spend(attempts: Sequence[ProviderAttemptRow]) -> dict[str, Any] | 
         "total": _bucket(labelled),
         "by_function": {label: _bucket(buckets[label]) for label in ordered},
     }
+
+
+def summarize_task_spend(attempts: Sequence[ProviderAttemptRow]) -> dict[str, Any] | None:
+    """What the whole task spent — every node attempt and the supervisor layer — in total and per
+    provider. ``None`` when the task made no provider call at all.
+
+    The cost is what the providers reported, summed; for Claude that figure covers the subagents an
+    attempt ran, and so do its token counts (they are read from the same per-model tally). An
+    attempt that reported no cost is left out of the sum rather than counted as free — the caller
+    states those beside the total (:mod:`~wastech_orchestrator.core.cost_gap`).
+    """
+    if not attempts:
+        return None
+    by_provider: dict[str, list[ProviderAttemptRow]] = {}
+    for row in attempts:
+        by_provider.setdefault(row.provider, []).append(row)
+    return {
+        "total": _bucket(attempts),
+        "by_provider": {name: _bucket(by_provider[name]) for name in sorted(by_provider)},
+    }
+
+
+def describe_task_cost(spend: Mapping[str, Any] | None) -> str | None:
+    """``"$114.11 over 19 provider calls (…)"`` for a :func:`summarize_task_spend` result, or
+    ``None`` when no attempt reported a cost.
+
+    The one wording of the task's cost, shared by ``worc status`` and the pull-request body. The
+    subagent note is added only when Claude ran: its reported cost covers the subagents an attempt
+    started, which is worth saying exactly where a Claude figure is in the total.
+    """
+    if spend is None:
+        return None
+    total = spend["total"]
+    cost = total.get("cost")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    calls = total["calls"]
+    note = (
+        " (Claude's reported cost includes its subagents)"
+        if "claude" in spend.get("by_provider", {})
+        else ""
+    )
+    return f"${cost:,.2f} over {calls} provider {'call' if calls == 1 else 'calls'}{note}"
 
 
 def _bucket(rows: Sequence[ProviderAttemptRow]) -> dict[str, Any]:

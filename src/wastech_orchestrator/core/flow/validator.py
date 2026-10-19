@@ -934,6 +934,62 @@ def lint_tool_loop_budgets(snapshot: FlowSnapshot) -> list[ToolBudgetWarning]:
     return warnings
 
 
+# -- non-blocking gate budget lint (non-fatal) -------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AdvisoryGateBudgetWarning:
+    """A non-blocking evaluator whose rework loop allows fewer fix rounds than it plans for.
+
+    The node accepts with ⚠️ on whichever limit it reaches first — its own ``max_rework_per_stage``
+    or the budget of the loop its ``rework`` edge charges — so when the loop is the smaller number,
+    ``max_rework_per_stage`` is partly dead and the warning names the loop, not the knob an author
+    would look at first. Equal numbers agree (a budget of N is N fix rounds) and say nothing.
+    """
+
+    node_id: str
+    max_rework_per_stage: int
+    loop: str
+    rounds: int
+
+
+def lint_advisory_gate_budgets(
+    snapshot: FlowSnapshot, *, max_fix_cycles: int | None = None
+) -> list[AdvisoryGateBudgetWarning]:
+    """One warning per non-blocking evaluator whose rework loop is tighter than its own budget.
+
+    ``max_fix_cycles`` is the config ceiling a named loop is clamped to; ``None`` (no config at
+    hand) compares against the flow's own number only.
+    """
+    warnings: list[AdvisoryGateBudgetWarning] = []
+    for node in snapshot.doc.nodes:
+        if not isinstance(node, EvaluatorNode) or node.blocking:
+            continue
+        for edge in snapshot.adjacency.get(node.id, ()):
+            if edge.outcome != "rework":
+                continue
+            if edge.loop is not None:
+                declared = snapshot.doc.budgets.get(edge.loop)
+                if declared is None:
+                    continue
+                rounds = min(declared, max_fix_cycles) if max_fix_cycles is not None else declared
+                label = edge.loop
+            elif edge.budget is not None:
+                rounds, label = edge.budget, f"{edge.from_node}->{edge.to}"
+            else:
+                continue
+            if rounds < node.max_rework_per_stage:
+                warnings.append(
+                    AdvisoryGateBudgetWarning(
+                        node_id=node.id,
+                        max_rework_per_stage=node.max_rework_per_stage,
+                        loop=label,
+                        rounds=rounds,
+                    )
+                )
+    return warnings
+
+
 # -- prompt-variable anti-drift lint (non-fatal) ------------------------------
 
 # The only names the supervisor's prompts (observe / finalize / handoff lenses) ever receive — the

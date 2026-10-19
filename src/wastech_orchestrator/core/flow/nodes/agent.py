@@ -49,6 +49,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeRun,
     NodeServices,
     open_node_run,
+    provider_fallback_note,
 )
 from wastech_orchestrator.core.flow.nodes.diff_gate import (
     already_approved_in_task,
@@ -1104,6 +1105,7 @@ def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:
         "done",
         structured_output=result.structured_output if result is not None else None,
         final_message=result.final_message if result is not None else None,
+        provider_fallback=provider_fallback_note(outcome),
     )
 
 

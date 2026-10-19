@@ -88,6 +88,14 @@ class ErrorClass(StrEnum):
     # be live) nor PARK_ELIGIBLE (an auto-resume must not paper over an uncontained process); the
     # Core routes it to ``manual_action_required`` and the children-file handle is retained.
     CONTAINMENT_UNVERIFIED = "containment_unverified"
+    # The agent ended its turn while background work it had started was still running, and the
+    # provider's own headless runtime stopped that work at exit — so the "result" is a promise
+    # ("waiting for the searches to finish"), not the work. Detected from the provider's own event
+    # stream (Claude: a backgrounded subagent whose task notification ends ``stopped``). RAISED so
+    # the attempt is never accepted as done; deliberately NOT in FALLBACK_ELIGIBLE (it is the
+    # agent's use of a runtime feature, not an outage, and the same prompt would spend the same
+    # money again elsewhere) nor PARK_ELIGIBLE — the stage stops with this reason named.
+    BACKGROUND_WORK_LOST = "background_work_lost"
     # A required host isolation capability is unavailable, detected DETERMINISTICALLY BEFORE any
     # model invocation: e.g. a Claude workspace-write node on Linux/WSL2 whose Bash
     # sandbox

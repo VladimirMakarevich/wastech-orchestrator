@@ -41,6 +41,7 @@ from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot,
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
+    lint_advisory_gate_budgets,
     lint_prompt_variables,
     lint_tool_loop_budgets,
     validate_flow,
@@ -147,17 +148,31 @@ class FlowRegistry:
             except (FlowResolutionError, FlowLoadError, FlowValidationError) as exc:
                 results.append(FlowCheck(name=name, error=str(exc), warnings=()))
                 continue
-            warnings = tuple(
-                f"{w.role_file} references unknown {{{w.token}}} (renders verbatim to the agent)"
-                for w in lint_prompt_variables(snap)
-            ) + tuple(
-                f"node {w.node_id!r}: the declared fix budget of {w.budget} holds as written "
-                "only while the tool emits a top-level 'findings' array; without one it is the "
-                "number of identical failures that ends the loop, not the fix rounds it plans"
-                for w in lint_tool_loop_budgets(snap)
-            )
+            warnings = self._lint_warnings(snap)
             results.append(FlowCheck(name=name, error=None, warnings=warnings))
         return results
+
+    def _lint_warnings(self, snap: FlowSnapshot) -> tuple[str, ...]:
+        """Every non-fatal authoring warning for one resolved flow, as operator sentences."""
+        max_fix_cycles = self._config.agents.max_fix_cycles if self._config is not None else None
+        prompt_vars = tuple(
+            f"{w.role_file} references unknown {{{w.token}}} (renders verbatim to the agent)"
+            for w in lint_prompt_variables(snap)
+        )
+        tool_budgets = tuple(
+            f"node {w.node_id!r}: the declared fix budget of {w.budget} holds as written "
+            "only while the tool emits a top-level 'findings' array; without one it is the "
+            "number of identical failures that ends the loop, not the fix rounds it plans"
+            for w in lint_tool_loop_budgets(snap)
+        )
+        gate_budgets = tuple(
+            f"node {w.node_id!r}: non-blocking evaluator plans max_rework_per_stage "
+            f"{w.max_rework_per_stage}, but its rework loop {w.loop!r} allows only "
+            f"{w.rounds} fix round(s) — it accepts with ⚠️ after {w.rounds}; raise the loop "
+            "budget or lower max_rework_per_stage so the two limits agree"
+            for w in lint_advisory_gate_budgets(snap, max_fix_cycles=max_fix_cycles)
+        )
+        return prompt_vars + tool_budgets + gate_budgets
 
     def operator_flow_names(self) -> list[str]:
         """Flow file stems in the operator's ``.worc/flows/`` only (packaged built-ins excluded).
