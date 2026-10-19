@@ -163,6 +163,7 @@ from wastech_orchestrator.core.summary_report import (
     render_provider_fallbacks_section,
     render_run_cost_section,
     render_skipped_nodes_section,
+    upsert_section,
     write_summary_report,
 )
 from wastech_orchestrator.core.supervisor import Supervisor
@@ -764,11 +765,6 @@ def _render_governance_section(paths: tuple[str, ...]) -> str:
 _FINDING_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
 
 
-def _str_or_none(value: object) -> str | None:
-    """*value* when it is a non-empty string, else ``None`` — for best-effort report fields."""
-    return value if isinstance(value, str) and value else None
-
-
 def _read_failure_report(path: str | None) -> dict[str, Any] | None:
     """Load ``failure_report.json`` for the terminal notification; ``None`` when absent.
 
@@ -865,6 +861,24 @@ class PipelineFailed(Exception):
         self.reason = reason
 
 
+@dataclass(frozen=True)
+class _StopFacts:
+    """Where a run that did not finish stopped: the node, the fix loop (``None`` for an
+    infrastructure or operator stop), and the limit or reason, in a few words."""
+
+    node: str | None
+    loop: str | None
+    limit: str | None
+
+
+def _reason_line(reason: str | None, *, limit: int = 160) -> str | None:
+    """The first line of a stop reason, bounded — what the ledger keeps of a free-form error."""
+    if not reason:
+        return None
+    line = next((text.strip() for text in reason.splitlines() if text.strip()), "")
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
 @dataclass
 class _Pipeline:
     """Mutable per-run context threaded through the stage drivers."""
@@ -912,6 +926,10 @@ class _Pipeline:
     # finalize turn, or the deterministic report's derivation from the evaluations) to the single
     # append site in `_finalize_task_artifacts`. Taken from memory, never re-derived from state.db.
     follow_ups: tuple[FollowUp, ...] = ()
+    #: Where and why THIS run stopped, when it stopped short of ``done`` — set by whatever wrote its
+    #: failure report in this process. The ledger reads it rather than the task row's report path,
+    #: which a ``rerun --continue`` keeps pointing at the previous attempt's report.
+    stop: _StopFacts | None = None
 
 
 class Eligibility(StrEnum):
@@ -1701,12 +1719,17 @@ class Orchestrator:
         ``--reset-fix-budget`` — a full paid pass that changes nothing — so the rerun plan names
         them rather than leaving the operator to find out from the bill.
         """
+        row = self._store.get_task(task_id)
+        active = row.active_subtask if row is not None else None
         spent = []
         for node_id in reachable_nodes(snapshot, start):
             node = snapshot.nodes_by_id[node_id]
             if not isinstance(node, EvaluatorNode) or node.blocking:
                 continue
-            used = self._store.count_rework_verdicts(task_id, node_id=node_id)
+            # Counted at the evaluator's own grain — per subtask — for the unit that resumes: the
+            # active subtask when this node has run inside it, else the unit outside subtasks.
+            by_subtask = self._store.count_rework_verdicts_by_subtask(task_id, node_id)
+            used = by_subtask.get(active, 0) if active in by_subtask else by_subtask.get(None, 0)
             if used >= node.max_rework_per_stage:
                 spent.append(f"{node_id} ({used}/{node.max_rework_per_stage})")
         return tuple(spent)
@@ -4538,6 +4561,10 @@ class Orchestrator:
                 return self._auto_merge(p, pr_url)
             return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
         if result.status is Status.MANUAL_ACTION_REQUIRED:
+            # The engine's recorder wrote this stop's failure report; the ledger names it from here.
+            p.stop = _StopFacts(
+                node=result.final_node, loop=result.stuck_loop, limit=result.limit_name
+            )
             return self._go_terminal(
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=result.limit_name or "stuck"
             )
@@ -4581,11 +4608,12 @@ class Orchestrator:
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
     def _append_fact_sections(self, p: _Pipeline) -> None:
-        """Append the deterministic fact sections to ``summary.md`` (idempotent within a run).
+        """Bring the deterministic fact sections in ``summary.md`` up to date (idempotent).
 
-        Skipped nodes, provider fallbacks and the run's cost. Only a provider-authored body needs
-        this: the deterministic report renders the same sections from the same renderers, so each
-        heading — which is also the idempotency key — exists once.
+        Skipped nodes, provider fallbacks and the run's cost, each replaced under its own heading or
+        appended. Needed for a provider-authored body, and for a body an earlier terminal wrote
+        that this run reuses (a park, then ``rerun --continue``): its cost and fallback list are
+        those of the earlier terminal until they are rewritten here.
         """
         md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
@@ -4595,14 +4623,11 @@ class Orchestrator:
             p.task.id, self._store.get_provider_attempts_for_task(p.task.id)
         )
         existing = md_path.read_text(encoding="utf-8")
-        missing = [s for s in sections if s.splitlines()[0] not in existing]
-        if not missing:
-            return
-        md_path.write_text(
-            existing.rstrip("\n") + "\n\n" + "\n".join(missing),
-            encoding="utf-8",
-            newline="",
-        )
+        body = existing
+        for section in sections:
+            body = upsert_section(body, section)
+        if body != existing:
+            md_path.write_text(body, encoding="utf-8", newline="")
 
     def _auto_merge(self, p: _Pipeline, pr_url: str) -> PipelineResult:
         """Merge the just-created PR, bypassing human review. Audited, idempotent, non-destructive.
@@ -4909,7 +4934,9 @@ class Orchestrator:
         if reason:
             log.warning("task stopped", extra={"final_status": final.value, "reason": reason})
         row = self._store.get_task(p.task.id)
-        if row is not None and not row.failure_report_path:
+        # Unless this run already recorded its stop: the row's report path may still name the
+        # previous attempt's report after a `rerun --continue`, which is not why THIS run stopped.
+        if row is not None and (not row.failure_report_path or p.stop is None):
             self._write_infra_failure_report(
                 p,
                 node_id=self._store.get_flow_checkpoint(p.task.id)[0],
@@ -4987,6 +5014,8 @@ class Orchestrator:
                 failing_node=failing_node_evidence(self._store, p.task.id, node_id),
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)
+            if p.stop is None:
+                p.stop = _StopFacts(node=node_id, loop=None, limit=_reason_line(error))
         except (OSError, sqlite3.Error) as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
 
@@ -5907,7 +5936,7 @@ class Orchestrator:
         recovered_loop: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
-        report = _read_failure_report(task_row.failure_report_path if task_row else None) or {}
+        stop = p.stop if final is not Status.DONE else None
         # Derived here, from the ledger, at the moment of the append — not carried from whenever a
         # rerun was planned. The carried value was a per-process map that nothing ever cleared, so
         # every later terminal of the same id in that process reused it: one run's ledger shows
@@ -5939,12 +5968,8 @@ class Orchestrator:
                 advanced_mode=self._advanced_mode,
                 recovered_from_stuck=recovered_loop is not None,
                 recovered_loop=recovered_loop,
-                stop_node=_str_or_none(report.get("node_id")) if final is not Status.DONE else None,
-                stuck_loop=_str_or_none(report.get("loop")) if final is not Status.DONE else None,
-                stuck_limit=(
-                    _str_or_none(report.get("limit_exhausted"))
-                    if final is not Status.DONE
-                    else None
-                ),
+                stop_node=stop.node if stop is not None else None,
+                stuck_loop=stop.loop if stop is not None else None,
+                stuck_limit=stop.limit if stop is not None else None,
             )
         )

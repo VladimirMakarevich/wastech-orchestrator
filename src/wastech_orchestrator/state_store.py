@@ -641,6 +641,17 @@ class SubtaskRow:
 #: in-flow ``rework`` verdicts before it no longer count against ``max_rework_per_stage``.
 REWORK_BUDGET_RESET = "rework_budget_reset"
 
+#: The in-flow ``rework`` verdicts still charged against ``max_rework_per_stage``: their node run
+#: still exists (a fresh rerun deletes those) and they come after the task's latest budget reset.
+#: Parameters: task id, task id, :data:`REWORK_BUDGET_RESET`.
+_REWORK_VERDICTS_IN_FORCE = (
+    "FROM evaluations e "
+    "JOIN node_runs n ON n.id = e.source_node_run_id "
+    "WHERE e.task_id = ? AND e.kind = 'in_flow_verdict' AND e.verdict = 'rework' "
+    "AND e.id > COALESCE((SELECT MAX(r.id) FROM evaluations r "
+    "WHERE r.task_id = ? AND r.kind = ?), 0)"
+)
+
 
 @dataclass(frozen=True)
 class EvaluationRow:
@@ -1789,13 +1800,7 @@ class StateStore:
         ``rerun --continue --reset-fix-budget`` appends, so the grant reaches a non-blocking
         evaluator's ``max_rework_per_stage`` as well as the engine's loop counters.
         """
-        sql = (
-            "SELECT COUNT(*) FROM evaluations e "
-            "JOIN node_runs n ON n.id = e.source_node_run_id "
-            "WHERE e.task_id = ? AND e.kind = 'in_flow_verdict' AND e.verdict = 'rework' "
-            "AND e.id > COALESCE((SELECT MAX(r.id) FROM evaluations r "
-            "WHERE r.task_id = ? AND r.kind = ?), 0)"
-        )
+        sql = "SELECT COUNT(*) " + _REWORK_VERDICTS_IN_FORCE
         params: list[object] = [task_id, task_id, REWORK_BUDGET_RESET]
         if node_id is not None:
             sql += " AND e.node_id = ?"
@@ -1805,6 +1810,17 @@ class StateStore:
             params.append(subtask_order)
         row = self._conn.execute(sql, params).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def count_rework_verdicts_by_subtask(self, task_id: str, node_id: str) -> dict[int | None, int]:
+        """:meth:`count_rework_verdicts` for one node, split by ``subtask_order`` (``None`` = the
+        unit outside any subtask) — the grain the evaluator's own cap is counted at."""
+        rows = self._conn.execute(
+            "SELECT e.subtask_order, COUNT(*) "
+            + _REWORK_VERDICTS_IN_FORCE
+            + " AND e.node_id = ? GROUP BY e.subtask_order",
+            (task_id, task_id, REWORK_BUDGET_RESET, node_id),
+        ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
 
     def record_rework_budget_reset(self, task_id: str) -> int:
         """Append the marker that starts every non-blocking evaluator's rework count afresh.

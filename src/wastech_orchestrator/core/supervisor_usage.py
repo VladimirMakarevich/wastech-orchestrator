@@ -15,7 +15,7 @@ the report is testable without a run and cannot disagree with the database it ca
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -90,6 +90,29 @@ def summarize_task_spend(attempts: Sequence[ProviderAttemptRow]) -> dict[str, An
         "total": _bucket(attempts),
         "by_provider": {name: _bucket(by_provider[name]) for name in sorted(by_provider)},
     }
+
+
+def describe_task_cost(spend: Mapping[str, Any] | None) -> str | None:
+    """``"$114.11 over 19 provider calls (…)"`` for a :func:`summarize_task_spend` result, or
+    ``None`` when no attempt reported a cost.
+
+    The one wording of the task's cost, shared by ``worc status`` and the pull-request body. The
+    subagent note is added only when Claude ran: its reported cost covers the subagents an attempt
+    started, which is worth saying exactly where a Claude figure is in the total.
+    """
+    if spend is None:
+        return None
+    total = spend["total"]
+    cost = total.get("cost")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    calls = total["calls"]
+    note = (
+        " (Claude's reported cost includes its subagents)"
+        if "claude" in spend.get("by_provider", {})
+        else ""
+    )
+    return f"${cost:,.2f} over {calls} provider {'call' if calls == 1 else 'calls'}{note}"
 
 
 def _bucket(rows: Sequence[ProviderAttemptRow]) -> dict[str, Any]:

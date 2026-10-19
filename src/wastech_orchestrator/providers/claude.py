@@ -1504,56 +1504,108 @@ def _sum_model_usage(
 _BACKGROUND_TASK_FINISHED = frozenset({"completed", "failed"})
 
 
+#: The tools an agent stops its own background tasks with. A task it stopped itself was dropped on
+#: purpose (it had what it needed), so it is not work the runtime took away.
+_STOP_TOOLS = frozenset({"TaskStop", "KillShell", "KillBash"})
+
+
+def _stat_int(stats: Mapping[str, Any] | None, *path: str) -> int | None:
+    """An integer leaf of ``subagent_stats`` (``killed.system``, ``completed``…), else ``None``."""
+    node: object = stats
+    for key in path:
+        node = node.get(key) if isinstance(node, Mapping) else None
+    return node if isinstance(node, int) and not isinstance(node, bool) else None
+
+
 class _BackgroundTasks:
-    """The backgrounded subagents a Claude run started, and how each one ended.
+    """The background tasks a Claude run started, and how each one ended.
 
     In ``-p`` mode the CLI stops every background task when the agent ends its turn, so an agent
     that launches subagents with ``run_in_background`` and then says "waiting for the results" ends
     the run with a promise instead of the work (``enrich-07b``, nodes ``thinkers`` and ``stories``:
-    four subagents each, all ``stopped``, an 87-character final message accepted as done). Only
-    subagents (``local_agent``) count: a backgrounded shell the CLI reaps at exit — a watcher, a dev
-    server — is housekeeping, not the work.
+    four subagents each, all ``stopped``, an 87-character final message accepted as done).
+
+    Two questions are asked of it, with different scopes. *Is anything still out?* counts every
+    backgrounded task, shells included — the CLI wakes the agent again when any of them reports, so
+    a ``result`` before that is not the last one. *Was work lost?* counts only subagents
+    (``local_agent``) that the runtime stopped: a backgrounded shell reaped at exit — a watcher, a
+    dev server — is housekeeping, and a subagent the agent stopped itself (``TaskStop``, reported as
+    ``killed.parent``) was dropped on purpose.
     """
 
     def __init__(self) -> None:
-        self._started: dict[str, str] = {}
+        self._agents: dict[str, str] = {}
+        self._others: set[str] = set()
         self._ended: dict[str, str] = {}
-        self._killed_by_runtime = 0
+        self._stopped_by_agent: set[str] = set()
+        self._stats: Mapping[str, Any] | None = None
 
     def feed(self, event: Mapping[str, Any]) -> None:
+        event_type = event.get("type")
         subtype = event.get("subtype")
         task_id = event.get("task_id")
         if subtype == "task_started" and isinstance(task_id, str):
-            is_agent = event.get("task_type") == "local_agent" or "subagent_type" in event
-            if event.get("is_backgrounded") is True and is_agent:
-                self._started[task_id] = str(event.get("description") or task_id)
+            if event.get("is_backgrounded") is True:
+                if event.get("task_type") == "local_agent" or "subagent_type" in event:
+                    self._agents[task_id] = str(event.get("description") or task_id)
+                else:
+                    self._others.add(task_id)
         elif subtype == "task_notification" and isinstance(task_id, str):
             self._ended[task_id] = str(event.get("status") or "")
-        if event.get("type") == "result":
-            stats = event.get("subagent_stats")
-            killed = stats.get("killed") if isinstance(stats, Mapping) else None
-            system = killed.get("system") if isinstance(killed, Mapping) else None
-            if isinstance(system, int) and not isinstance(system, bool):
-                self._killed_by_runtime = max(self._killed_by_runtime, system)
+        elif event_type == "assistant":
+            self._note_stop_calls(event)
+        if event_type == "result" and isinstance(event.get("subagent_stats"), Mapping):
+            self._stats = event["subagent_stats"]
+
+    def _note_stop_calls(self, event: Mapping[str, Any]) -> None:
+        """Remember the background tasks the agent stopped with its own tool call."""
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                continue
+            tool_input = block.get("input")
+            if block.get("name") not in _STOP_TOOLS or not isinstance(tool_input, Mapping):
+                continue
+            for key in ("task_id", "shell_id", "id"):
+                value = tool_input.get(key)
+                if isinstance(value, str):
+                    self._stopped_by_agent.add(value)
 
     @property
     def pending(self) -> bool:
-        """A backgrounded subagent has started and not yet reported an ending."""
-        return any(task_id not in self._ended for task_id in self._started)
+        """A backgrounded task of any kind has started and not yet reported an ending."""
+        started = [*self._agents, *self._others]
+        return any(task_id not in self._ended for task_id in started)
 
     def abandoned(self) -> tuple[str, ...]:
-        """One label per backgrounded subagent the run ended without, in start order."""
+        """One label per backgrounded subagent the runtime stopped before it reported, in order.
+
+        A tally that says the runtime killed nothing (``killed.system == 0``) settles it. Otherwise
+        the per-task events decide whenever there are any; the tally alone is the fallback for a CLI
+        that reports no per-task events, and even then only background subagents that neither
+        completed nor failed can count — a foreground subagent the runtime killed is not one.
+        """
+        system_kills = _stat_int(self._stats, "killed", "system")
+        if system_kills == 0:
+            return ()
         lost = tuple(
             f"{label} ({self._ended.get(task_id) or 'still running at exit'})"
-            for task_id, label in self._started.items()
+            for task_id, label in self._agents.items()
             if self._ended.get(task_id) not in _BACKGROUND_TASK_FINISHED
+            and task_id not in self._stopped_by_agent
         )
-        if lost:
+        if lost or self._agents or system_kills is None:
             return lost
-        # A CLI that reports the tally but not the per-task events still says how many it killed.
+        background = _stat_int(self._stats, "started_in_background") or 0
+        finished = (_stat_int(self._stats, "completed") or 0) + (
+            _stat_int(self._stats, "failed") or 0
+        )
+        count = min(system_kills, max(0, background - finished))
         return tuple(
-            f"background subagent {n} (stopped by the CLI at exit)"
-            for n in range(1, self._killed_by_runtime + 1)
+            f"background subagent {n} (stopped by the CLI at exit)" for n in range(1, count + 1)
         )
 
 
@@ -1577,8 +1629,9 @@ class ClaudeSettleTracker:
     """Says when a Claude ``stream-json`` run is finished even though the process has not exited.
 
     Settled means: the latest event is a terminal ``result`` (followed by nothing but the CLI's own
-    bookkeeping) and no backgrounded subagent is still out. A subagent still running means the CLI
-    will wake the agent again when it reports, so a ``result`` before that is not the last one.
+    bookkeeping) and no backgrounded task — subagent or shell — is still out. A task still running
+    means the CLI will wake the agent again when it reports, so a ``result`` before that is not the
+    last one.
     """
 
     def __init__(self) -> None:
@@ -1760,9 +1813,12 @@ class ClaudeCodeProvider(BaseCliProvider):
         an agent that fans out in the background and then "waits for the results" ends the run with
         a promise instead of the work. With the switch set the agent's subagents run in the
         foreground — several launched in one message still run in parallel — and the turn ends only
-        once they have reported.
+        once they have reported. An opt-in also removes the switch when the parent environment
+        carries it (the advanced mode forwards that environment whole), so the setting decides.
         """
-        if not self._config.background_tasks:
+        if self._config.background_tasks:
+            env.pop(_DISABLE_BACKGROUND_TASKS_ENV, None)
+        else:
             env[_DISABLE_BACKGROUND_TASKS_ENV] = "1"
         return env
 

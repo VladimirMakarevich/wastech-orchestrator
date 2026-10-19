@@ -17,8 +17,9 @@ from wastech_orchestrator.core.summary_report import (
     RUN_COST_HEADING,
     render_provider_fallbacks_section,
     render_run_cost_section,
+    upsert_section,
 )
-from wastech_orchestrator.core.supervisor_usage import summarize_task_spend
+from wastech_orchestrator.core.supervisor_usage import describe_task_cost, summarize_task_spend
 from wastech_orchestrator.providers.base import ErrorClass, ProviderId
 from wastech_orchestrator.routing.router import (
     ProviderAttempt,
@@ -128,8 +129,37 @@ def test_the_cost_section_sums_what_was_priced_and_names_what_was_not() -> None:
     assert section is not None
     assert section.startswith(RUN_COST_HEADING)
     assert "Recorded provider cost: $114.11 over 3 provider calls" in section
-    assert "include its subagents" in section
+    assert "Claude's reported cost includes its subagents" in section
     assert "Codex cost not accounted" in section
+
+
+def test_the_subagent_note_appears_only_when_claude_ran() -> None:
+    section = render_run_cost_section([_attempt(1, "codex", cost=None)])
+    assert section is not None
+    assert "subagents" not in section
+    assert "No provider cost was recorded for its 1 provider call." in section
+
+
+def test_status_and_the_pull_request_share_one_cost_wording() -> None:
+    attempts = [_attempt(1, "claude", cost=10.0), _attempt(2, "claude", cost=1.5)]
+    described = describe_task_cost(summarize_task_spend(attempts))
+    assert (
+        described == "$11.50 over 2 provider calls (Claude's reported cost includes its subagents)"
+    )
+    section = render_run_cost_section(attempts)
+    assert section is not None and described in section
+
+
+def test_a_reused_body_gets_its_fact_sections_rewritten_not_duplicated() -> None:
+    # A body written at an earlier park, reused after `rerun --continue`: its cost was the park's.
+    body = "# T\n\nprose\n\n## Run cost\n\nRecorded provider cost: $40.00.\n\n## Tail\n\nend\n"
+    fresh = "## Run cost\n\nRecorded provider cost: $114.11.\n"
+    updated = upsert_section(body, fresh)
+    assert updated.count("## Run cost") == 1
+    assert "$114.11" in updated and "$40.00" not in updated
+    assert updated.endswith("## Tail\n\nend\n")
+    assert upsert_section(updated, fresh) == updated
+    assert upsert_section("# T\n", fresh) == "# T\n\n" + fresh
 
 
 def test_task_spend_totals_every_attempt_and_splits_by_provider() -> None:
@@ -148,6 +178,6 @@ def test_status_prints_the_task_cost(tmp_path: Path) -> None:
     store.insert_task(TaskRow(task_id="t", title="T", status=Status.DONE))
     store.record_provider_attempt(_attempt(None, "claude", cost=114.11))
     assert cli._task_cost_line(store, "t") == (
-        "$114.11 over 1 provider call (Claude figures include subagents)"
+        "$114.11 over 1 provider call (Claude's reported cost includes its subagents)"
     )
     assert cli._task_cost_line(store, "missing") is None

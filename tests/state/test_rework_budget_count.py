@@ -75,3 +75,24 @@ def test_the_reset_marker_is_invisible_to_verdict_readers(tmp_path: Path) -> Non
     store.record_rework_budget_reset(_TASK)
     rows = [row for row in store.get_evaluations(_TASK) if row.kind == "in_flow_verdict"]
     assert rows == []
+
+
+def test_counts_split_by_subtask_follow_the_evaluator_s_own_grain(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    for subtask in (1, 1, 2, None):
+        run_id = store.record_node_run(
+            NodeRunRow(task_id=_TASK, node_id="gate", node_kind="evaluator", subtask_order=subtask)
+        )
+        store.record_evaluation(
+            EvaluationRow(
+                task_id=_TASK,
+                node_id="gate",
+                source_node_run_id=run_id,
+                subtask_order=subtask,
+                kind="in_flow_verdict",
+                verdict="rework",
+            )
+        )
+    assert store.count_rework_verdicts_by_subtask(_TASK, "gate") == {1: 2, 2: 1, None: 1}
+    store.record_rework_budget_reset(_TASK)
+    assert store.count_rework_verdicts_by_subtask(_TASK, "gate") == {}

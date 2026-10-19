@@ -86,20 +86,31 @@ _CAPABILITY_MARKERS: tuple[str, ...] = (
 )
 
 
-# Substrings of Codex refusing the generated profile itself — a config it will not load — before
-# any probe command runs. Every probe then "fails", and read as a capability gap that was waved
-# through in the advanced mode, after which ``codex exec`` hit the same refusal in one second and
-# the stage silently fell back to the other provider. It is our profile, so it is ours to fix: a
-# configuration error, never a host verdict.
+# Codex refusing the generated profile itself — a config it will not load — before any probe
+# command runs. Every probe then "fails", and read as a capability gap that was waved through in the
+# advanced mode, after which ``codex exec`` hit the same refusal in one second and the stage
+# silently fell back to the other provider. It is our profile, so it is ours to fix: a
+# configuration error, never a host verdict. Recognised narrowly — the CLI's own ``Error:`` line,
+# naming a config/profile/path problem — and only after the host-capability markers had their say,
+# so a sandbox that fails to start with "invalid configuration" in its message stays a host verdict.
+_PROFILE_REJECTED_PREFIX = "error:"
 _PROFILE_REJECTED_MARKERS: tuple[str, ...] = (
     "must be absolute",
-    "error loading config",
-    "failed to load config",
-    "invalid configuration",
+    "config",
+    "permissions",
+    "profile",
+    "filesystem path",
     "unknown variant",
     "unknown field",
-    "invalid type:",
 )
+
+
+def _profile_rejected(output: str) -> bool:
+    """Whether the CLI's first output line is its own refusal of the generated profile."""
+    first = _first_line(output).lower()
+    return first.startswith(_PROFILE_REJECTED_PREFIX) and any(
+        marker in first for marker in _PROFILE_REJECTED_MARKERS
+    )
 
 
 def _first_line(output: str) -> str:
@@ -479,18 +490,6 @@ def _classify_probe(
     five runs falling back. Only the runner's own marker (``codex sandbox`` itself failed to launch
     or timed out) stays a host verdict for that probe.
     """
-    if denied and any(marker in lowered for marker in _PROFILE_REJECTED_MARKERS):
-        return CanaryOutcome(
-            ok=False,
-            error_class=ErrorClass.CONFIGURATION_ERROR,
-            message=(
-                "permission-profile canary FAILED: codex rejected the generated profile before "
-                f"running probe {probe.label!r} — {_first_line(output or lowered)!r}. "
-                "`codex exec` would refuse the same profile, so the attempt is stopped here "
-                "instead of falling back"
-            ),
-            evidence=tuple(evidence),
-        )
     if (
         denied
         and not probe.expect_denied
@@ -519,6 +518,18 @@ def _classify_probe(
                 f"codex sandbox could not enforce the permission profile on this host "
                 f"(probe {probe.label!r}); the requested isolation cannot be demonstrated "
                 f"({capability_marker})"
+            ),
+            evidence=tuple(evidence),
+        )
+    if denied and _profile_rejected(output or lowered):
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CONFIGURATION_ERROR,
+            message=(
+                "permission-profile canary FAILED: codex rejected the generated profile before "
+                f"running probe {probe.label!r} — {_first_line(output or lowered)!r}. "
+                "`codex exec` would refuse the same profile, so the attempt is stopped here "
+                "instead of falling back"
             ),
             evidence=tuple(evidence),
         )

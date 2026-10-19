@@ -808,6 +808,66 @@ def test_a_pinned_provider_that_falls_back_is_loud_everywhere(
     assert "`process_crashed`" in body
 
 
+_BLOCKING_ONE_ROUND_FLOW = _NON_BLOCKING_REVIEW_FLOW.replace(
+    "blocking: false", "blocking: true"
+).replace("review_fix: 5", "review_fix: 1")
+
+
+def test_the_ledger_names_where_this_run_stopped_not_where_an_earlier_one_did(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The finalize packet marks each earlier stop between the steps from these ledger fields. They
+    # must describe the run that is ending: after `rerun --continue` the task row still points at
+    # the previous attempt's failure report, and reading it named the wrong node and fix loop.
+    from wastech_orchestrator.core.decomposition import DecompositionDecision
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.core.loop_control import LoopCounters
+    from wastech_orchestrator.core.orchestrator import _Pipeline
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    for role in ("implementation", "review", "fixing"):
+        (flows / "roles" / f"{role}.md").write_text(f"{role}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_BLOCKING_ONE_ROUND_FLOW, "utf-8")
+    gating = {"findings": [{"severity": "high", "path": "feature.py", "what": "no", "fix": None}]}
+    providers = _both(outputs={"review": ("needs work", gating)})
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-stop"))
+    assert first.final_status is Status.MANUAL_ACTION_REQUIRED
+    record = ledger.records()[-1]
+    assert (record["stop_node"], record["stuck_loop"], record["stuck_limit"]) == (
+        "review",
+        "review_fix",
+        "max_fix_cycles",
+    )
+
+    # A later stop that is not a fix loop (an operator answer that never came, say) while the row
+    # still names the first report: this run's own reason is recorded, and the report is rewritten.
+    stale_report = store.get_task("task-stop").failure_report_path
+    pipeline = _Pipeline(
+        task=NormalizedTask(id="task-stop", title="T", description="d"),
+        task_file="task-stop.md",
+        status=Status.RUNNING,
+        counters=LoopCounters(),
+        decomposition=DecompositionDecision(accepted=False, reason="single unit", n=1),
+    )
+    orch._explain_terminal(pipeline, Status.MANUAL_ACTION_REQUIRED, "human input failed (timeout)")
+    orch._append_ledger(
+        pipeline, Status.MANUAL_ACTION_REQUIRED, pr_url=None, cleanup_safe=True, attempt=2
+    )
+    second = ledger.records()[-1]
+    assert second["stuck_loop"] is None
+    assert second["stuck_limit"] == "human input failed (timeout)"
+    report = json.loads(Path(stale_report).read_text(encoding="utf-8"))
+    assert report["limit_exhausted"] == "human input failed (timeout)"
+
+
 def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

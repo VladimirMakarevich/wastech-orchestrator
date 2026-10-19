@@ -444,3 +444,50 @@ def test_an_interruption_older_than_the_record_is_left_out(tmp_path: Path) -> No
     )
     steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
     assert [step.get("kind") for step in steps] == ["evaluator"]
+
+
+def test_superseded_verdicts_share_one_budget_across_the_packet(tmp_path: Path) -> None:
+    # A fifteen-round loop must not grow the packet fifteen-fold: past the shared budget a
+    # superseded verdict keeps its counts and nothing else.
+    store = _store(tmp_path)
+    verdict = json.dumps([{"severity": "low", "reason": "z" * 250} for _ in range(30)])
+    for _ in range(12):
+        run_id = _run_row(store, "review", "evaluator", outcome="rework")
+        _record_verdict(store, "review", run_id, verdict)
+    steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
+    superseded = [step for step in steps if step.get("findings_superseded")]
+    assert len(superseded) == 11
+    assert sum(len(json.dumps(step["findings"])) for step in superseded) <= 24_000 + 11 * 2
+    assert superseded[-1]["findings"] == []
+    assert superseded[-1]["findings_omitted"] == 30
+    assert "findings_superseded" not in steps[-1]
+
+
+def test_an_entry_that_is_not_a_finding_is_not_reported_as_cut(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    run_id = _run_row(store, "gate", "evaluator", outcome="accept")
+    _record_verdict(store, "gate", run_id, json.dumps(["stray note", {"severity": "low"}]))
+    step = json.loads(render_packet(_facts(tmp_path, store)))["steps"][0]
+    assert step["findings_total"] == 1
+    assert "findings_omitted" not in step
+    assert step["findings_malformed"] == 1
+
+
+def test_an_older_infra_stop_is_not_called_a_fix_loop(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _timed_run(store, "thinkers", "agent", "2026-10-19T14:30:00+00:00", "done")
+    _timed_run(store, "thinkers", "agent", "2026-10-19T16:00:00+00:00", "done")
+    Ledger(_art(tmp_path) / "logs").append(
+        LedgerRecord(
+            id=_TASK,
+            title="T",
+            final_status="failed",
+            finished_at="2026-10-19T15:00:00+00:00",
+            stop_node="thinkers",
+            stuck_loop="infra",
+            stuck_limit="background_work_lost",
+        )
+    )
+    note = json.loads(render_packet(_facts(tmp_path, store)))["steps"][1]["note"]
+    assert "fix loop" not in note
+    assert "background_work_lost" in note

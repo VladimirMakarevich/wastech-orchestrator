@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_facts, read_final_diff
-from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.ledger import INFRA_LOOP, Ledger
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
 
@@ -67,6 +67,10 @@ _FINAL_FINDING_REASON_MAX = 1_200
 _FINAL_FINDINGS_BUDGET = 40_000
 _SUPERSEDED_FINDING_REASON_MAX = 300
 _SUPERSEDED_FINDINGS_BUDGET = 8_000
+#: All superseded verdicts of a packet together, so a long fix loop cannot grow the packet without
+#: bound: past it a superseded step keeps only its counts. Final verdicts are one per evaluator
+#: node, so their own budget bounds them already.
+_SUPERSEDED_FINDINGS_PACKET_BUDGET = 24_000
 #: Longest rendered observation digest; the oldest lines are dropped and the remainder is marked.
 _OBSERVATIONS_MAX = 8_000
 
@@ -388,6 +392,7 @@ def _steps(
     rendered: list[dict[str, Any]] = []
     pending = sorted(interruptions, key=lambda item: item.finished_at)
     final_verdicts = _final_verdict_indexes(steps)
+    superseded_left = _SUPERSEDED_FINDINGS_PACKET_BUDGET
     for index, facts in enumerate(steps):
         while pending and facts.started_at and pending[0].finished_at <= facts.started_at:
             rendered.append(_interruption_entry(pending.pop(0)))
@@ -420,7 +425,16 @@ def _steps(
         if facts.tool_stdout and facts.tool_stdout.strip():
             step["stdout_head"] = _bounded(facts.tool_stdout, _STEP_STDOUT_MAX)
         if facts.findings and facts.findings.strip() not in ("", "[]", "{}"):
-            step.update(_findings_entry(facts.findings, final=index in final_verdicts))
+            final = index in final_verdicts
+            budget = (
+                _FINAL_FINDINGS_BUDGET
+                if final
+                else min(_SUPERSEDED_FINDINGS_BUDGET, superseded_left)
+            )
+            entry, used = _findings_entry(facts.findings, final=final, budget=budget)
+            if not final:
+                superseded_left -= used
+            step.update(entry)
         rendered.append(step)
     rendered.extend(_interruption_entry(item) for item in pending)
     return rendered
@@ -435,25 +449,28 @@ def _final_verdict_indexes(steps: Sequence[StepFacts]) -> set[int]:
     return set(last.values())
 
 
-def _findings_entry(findings_json: str, *, final: bool) -> dict[str, Any]:
-    """The step's findings as a list of whole items, bounded per reason and per step.
+def _findings_entry(findings_json: str, *, final: bool, budget: int) -> tuple[dict[str, Any], int]:
+    """The step's findings as a list of whole items, bounded per reason and by ``budget``.
 
-    Unparseable JSON degrades to the bounded text it used to be — this is an advisory surface, so a
-    malformed row costs its structure, never the packet.
+    Returns the entry and the characters it used. ``findings_total`` counts the well-formed findings
+    and ``findings_omitted`` only those the budget cut, so "omitted" always means "there was more";
+    an entry that is not a finding at all is counted apart as ``findings_malformed``. Unparseable
+    JSON degrades to the bounded text it used to be — this is an advisory surface, so a malformed
+    row costs its structure, never the packet.
     """
     reason_max = _FINAL_FINDING_REASON_MAX if final else _SUPERSEDED_FINDING_REASON_MAX
-    budget = _FINAL_FINDINGS_BUDGET if final else _SUPERSEDED_FINDINGS_BUDGET
     try:
         parsed = json.loads(findings_json)
     except json.JSONDecodeError:
-        return {"findings": _bounded(findings_json, reason_max)}
+        text = _bounded(findings_json, reason_max)
+        return {"findings": text}, len(text)
     if not isinstance(parsed, list):
-        return {"findings": _bounded(findings_json, reason_max)}
+        text = _bounded(findings_json, reason_max)
+        return {"findings": text}, len(text)
+    well_formed = [raw for raw in parsed if isinstance(raw, dict)]
     items: list[dict[str, Any]] = []
     used = 0
-    for raw in parsed:
-        if not isinstance(raw, dict):
-            continue
+    for raw in well_formed:
         # Every field the row recorded, whole; only free text is bounded.
         item = {
             key: _bounded(value, reason_max) if isinstance(value, str) else value
@@ -461,23 +478,28 @@ def _findings_entry(findings_json: str, *, final: bool) -> dict[str, Any]:
             if value is not None
         }
         size = len(json.dumps(item, ensure_ascii=False))
-        if items and used + size > budget:
+        if used + size > budget and (items or not final):
             break
         items.append(item)
         used += size
-    entry: dict[str, Any] = {"findings": items, "findings_total": len(parsed)}
-    if len(items) < len(parsed):
-        entry["findings_omitted"] = len(parsed) - len(items)
+    entry: dict[str, Any] = {"findings": items, "findings_total": len(well_formed)}
+    if len(items) < len(well_formed):
+        entry["findings_omitted"] = len(well_formed) - len(items)
+    if len(well_formed) < len(parsed):
+        entry["findings_malformed"] = len(parsed) - len(well_formed)
     if not final:
         entry["findings_superseded"] = True
-    return entry
+    return entry, used
 
 
 def _interruption_entry(item: Interruption) -> dict[str, Any]:
     """A record line between two steps: the run stopped here and an operator resumed it."""
     why = ""
-    if item.loop and item.limit:
-        why = f" — the {item.loop!r} fix loop reached {item.limit}"
+    # `infra` is how an older ledger record spelled "no fix loop": an infrastructure or operator
+    # stop, whose limit is a reason, not a budget.
+    loop = item.loop if item.loop != INFRA_LOOP else None
+    if loop and item.limit:
+        why = f" — the {loop!r} fix loop reached {item.limit}"
     elif item.limit:
         why = f" — {item.limit}"
     where = f" at {item.node!r}" if item.node else ""

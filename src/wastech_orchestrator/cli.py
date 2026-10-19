@@ -58,7 +58,7 @@ from wastech_orchestrator.core.orchestrator import (
     RerunPlan,
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status
-from wastech_orchestrator.core.supervisor_usage import summarize_task_spend
+from wastech_orchestrator.core.supervisor_usage import describe_task_cost, summarize_task_spend
 from wastech_orchestrator.env_file import count_env_file, load_env_file
 from wastech_orchestrator.git_manager import (
     KIND_PR,
@@ -4895,27 +4895,20 @@ def _section_task_ids(
 
 
 def _task_cost_line(store: StateStore | None, task_id: str) -> str | None:
-    """``"$114.11 over 19 provider calls (Claude figures include subagents)"``, or ``None``.
+    """The task's recorded spend in the shared wording (:func:`describe_task_cost`), or ``None``.
 
-    The task's recorded spend — every node attempt and the supervisor layer — summed from the same
-    rows ``summary.json`` reports. Read-only and best-effort like the gap note beside it: a store
-    error yields no line rather than failing the view.
+    Every node attempt and the supervisor layer, summed from the same rows ``summary.json``
+    reports. Read-only and best-effort like the gap note beside it: a store error yields no line
+    rather than failing the view.
     """
     if store is None:
         return None
     try:
-        spend = summarize_task_spend(store.get_provider_attempts_for_task(task_id))
+        return describe_task_cost(
+            summarize_task_spend(store.get_provider_attempts_for_task(task_id))
+        )
     except sqlite3.Error:
         return None
-    if spend is None:
-        return None
-    total = spend["total"]
-    cost = total.get("cost")
-    if not isinstance(cost, (int, float)):
-        return None
-    calls = total["calls"]
-    plural = "call" if calls == 1 else "calls"
-    return f"${cost:,.2f} over {calls} provider {plural} (Claude figures include subagents)"
 
 
 def _cost_gap_note(store: StateStore | None, task_ids: Sequence[str]) -> str | None:

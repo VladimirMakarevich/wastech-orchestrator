@@ -25,7 +25,10 @@ from wastech_orchestrator.providers.codex_canary import (
     run_codex_canary,
     run_codex_capability_smoke,
 )
-from wastech_orchestrator.providers.codex_profile import build_codex_permission_profile
+from wastech_orchestrator.providers.codex_profile import (
+    build_codex_permission_profile,
+    toml_basic_string,
+)
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
 
 _CODEX_REFUSAL = (
@@ -124,7 +127,64 @@ def test_the_preflight_smoke_builds_the_attempt_s_deny_entries(tmp_path: Path) -
         denied_read_paths=(".env",),
     )
     assert seen, "the smoke never ran a probe"
-    assert all(str(env_file) in profile for profile in seen)
-    assert all(str(runs_home) in profile for profile in seen)
+    # The profile is TOML: a native Windows path appears with its backslashes escaped.
+    assert all(toml_basic_string(str(env_file)) in profile for profile in seen)
+    assert all(toml_basic_string(str(runs_home)) in profile for profile in seen)
     # And a profile Codex refuses fails preflight outright instead of reading as a host gap.
     assert report.status == CAPABILITY_POLICY_FAILED
+
+
+def test_a_relative_local_path_reaches_codex_as_absolute_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same refusal from the other relative source: `repo.local_path: ./repo` makes the layout,
+    # and so the workspace and every internal deny root, relative.
+    monkeypatch.chdir(tmp_path)
+    profile = build_codex_permission_profile(
+        permission_profile="read-only",
+        working_directory="repo",
+        deny_policy=build_internal_deny_policy(RuntimeLayout.default("repo"), env_file=None),
+        write_guard=None,
+        denied_read_paths=(".env",),
+        network_access=True,
+        strict_isolation=False,
+    )
+    keys = [key for key in profile["filesystem"] if not key.startswith(":")]
+    assert keys and all(Path(key).is_absolute() for key in keys), keys
+
+
+def _probe_says(message: str):
+    def _run(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
+        return 1, message + "\n"
+
+    return _run
+
+
+def _canary(runner) -> ErrorClass | None:
+    return run_codex_canary(
+        command="codex",
+        profile_arg="permissions.worc={ }",
+        working_directory="/clone",
+        private_probe="/clone/.worc/logs/req.json",
+        exchange_probe="/clone/.worc-io/t/task.md",
+        env={},
+        system="Windows",
+        runner=runner,
+    ).error_class
+
+
+def test_a_sandbox_that_cannot_start_stays_a_host_verdict_whatever_its_wording() -> None:
+    # A host gap whose message happens to say "invalid configuration" is still a host gap: the
+    # advanced mode warns and proceeds on it, where a configuration error would stop the attempt.
+    assert (
+        _canary(_probe_says("Error: failed to start sandbox: invalid configuration for token"))
+        is ErrorClass.CAPABILITY_UNAVAILABLE
+    )
+
+
+def test_a_probe_s_own_error_text_is_not_read_as_a_refused_profile() -> None:
+    # Only the CLI's own `Error:` line counts; a denied command's message is not the CLI's verdict.
+    assert (
+        _canary(_probe_says("cat: profile.toml: unknown field in config"))
+        is ErrorClass.CAPABILITY_UNAVAILABLE
+    )

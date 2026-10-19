@@ -116,6 +116,74 @@ def test_the_subagent_tally_counts_when_task_events_are_missing() -> None:
     assert len(parsed.abandoned_work) == 3
 
 
+def _stop_call(task_id: str) -> dict[str, object]:
+    return {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "TaskStop", "input": {"task_id": task_id}},
+            ]
+        },
+    }
+
+
+def test_a_subagent_the_agent_stopped_itself_is_not_lost_work() -> None:
+    # The agent had what it needed from one researcher and stopped the other on purpose.
+    parsed = parse_stream_json(
+        _stream(
+            _started("a"),
+            _started("b"),
+            _ended("a", "completed"),
+            _stop_call("b"),
+            _ended("b", "stopped"),
+            _result("Report written."),
+        )
+    )
+    assert parsed.abandoned_work == ()
+
+
+def test_a_tally_of_no_system_kills_settles_it() -> None:
+    # `killed.parent` is the agent's own stop; only `killed.system` is the runtime taking work away.
+    parsed = parse_stream_json(
+        _stream(
+            _started("a"),
+            _ended("a", "stopped"),
+            _result(subagent_stats={"killed": {"parent": 1, "system": 0}}),
+        )
+    )
+    assert parsed.abandoned_work == ()
+
+
+def test_the_tally_is_not_consulted_when_every_background_subagent_reported() -> None:
+    # A foreground subagent the runtime killed is not lost background work.
+    parsed = parse_stream_json(
+        _stream(
+            _started("a"),
+            _ended("a", "completed"),
+            _result(
+                subagent_stats={"started_in_background": 1, "completed": 1, "killed": {"system": 1}}
+            ),
+        )
+    )
+    assert parsed.abandoned_work == ()
+
+
+def test_the_tally_alone_counts_only_background_subagents_that_never_reported() -> None:
+    parsed = parse_stream_json(
+        _stream(
+            _result(
+                subagent_stats={
+                    "started_in_background": 3,
+                    "completed": 2,
+                    "failed": 0,
+                    "killed": {"system": 2},
+                }
+            )
+        )
+    )
+    assert len(parsed.abandoned_work) == 1
+
+
 def test_the_last_result_decides_but_the_structured_output_survives_a_closing_prose_turn() -> None:
     # run 99: several results, the last a prose turn after the StructuredOutput call.
     parsed = parse_stream_json(
@@ -215,7 +283,9 @@ def test_an_operator_can_opt_back_into_background_tasks(
     provider = ClaudeCodeProvider(
         _config("claude", background_tasks=True), security=security_config, artifacts_root=tmp_path
     )
-    assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in provider._augment_child_env({})
+    # Also when the parent environment carries the switch: the advanced mode forwards it whole.
+    inherited = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in provider._augment_child_env(inherited)
 
 
 # -- the idle tail after the final result ----------------------------------------------------------
@@ -241,6 +311,15 @@ def test_a_result_with_a_subagent_still_out_is_not_the_last_one() -> None:
     _feed(tracker, _ended("a", "completed"))
     assert tracker.settled is False  # the wake-up turn is still owed
     _feed(tracker, {"type": "assistant", "message": {}}, _result())
+    assert tracker.settled is True
+
+
+def test_a_background_shell_still_running_keeps_the_run_open() -> None:
+    # The CLI wakes the agent when the shell reports, so the result before that is not the last.
+    tracker = ClaudeSettleTracker()
+    _feed(tracker, _started("sh", task_type="local_bash"), _result())
+    assert tracker.settled is False
+    _feed(tracker, _ended("sh", "completed"), {"type": "assistant", "message": {}}, _result())
     assert tracker.settled is True
 
 

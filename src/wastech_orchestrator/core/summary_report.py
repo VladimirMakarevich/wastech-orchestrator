@@ -37,7 +37,7 @@ from wastech_orchestrator.core.supervisor_packet import (
     split_check_runs,
     summarize_diff,
 )
-from wastech_orchestrator.core.supervisor_usage import summarize_task_spend
+from wastech_orchestrator.core.supervisor_usage import describe_task_cost, summarize_task_spend
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAttemptRow
 
@@ -118,6 +118,31 @@ def render_skipped_nodes_section(skipped_nodes: Iterable[str]) -> str:
     return f"{SKIPPED_NODES_HEADING}\n\n{lines}\n"
 
 
+def upsert_section(body: str, section: str) -> str:
+    """*body* with *section* in place: an existing block under the same heading is replaced, else
+    the section is appended.
+
+    A block runs from its heading line to the next ``## `` heading or the end. Replacing rather than
+    skipping matters for the time-sensitive sections: a body written at an earlier terminal (a park,
+    then ``rerun --continue``) would otherwise keep that terminal's cost and fallback list.
+    """
+    heading = section.splitlines()[0]
+    lines = body.rstrip("\n").split("\n")
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return body.rstrip("\n") + "\n\n" + section
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    replacement = section.rstrip("\n").split("\n")
+    tail = lines[end:]
+    if tail:
+        replacement.append("")
+    return "\n".join(lines[:start] + replacement + tail) + "\n"
+
+
 @dataclass(frozen=True)
 class RunFacts:
     """Whole-run facts both summary bodies carry, whoever wrote the prose.
@@ -189,13 +214,13 @@ def render_run_cost_section(attempts: Sequence[ProviderAttemptRow]) -> str | Non
     spend = summarize_task_spend(attempts)
     if spend is None:
         return None
-    total = spend["total"]
-    cost = total.get("cost")
-    calls = total["calls"]
-    figure = f"${cost:,.2f}" if isinstance(cost, (int, float)) else "no recorded cost"
+    described = describe_task_cost(spend)
+    calls = spend["total"]["calls"]
     line = (
-        f"Recorded provider cost: {figure} over {calls} provider "
-        f"{'call' if calls == 1 else 'calls'} (Claude figures include its subagents)."
+        f"Recorded provider cost: {described}."
+        if described is not None
+        else f"No provider cost was recorded for its {calls} provider "
+        f"{'call' if calls == 1 else 'calls'}."
     )
     gap = render_cost_gap(cost_gaps(attempts))
     lines = [RUN_COST_HEADING, "", line]
