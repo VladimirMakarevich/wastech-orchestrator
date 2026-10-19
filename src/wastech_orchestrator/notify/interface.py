@@ -61,6 +61,12 @@ TRACE_ADOPTED_COMMITS = "done (publish adopted commits it did not make)"
 #: ``rework``: a budget-exhausted accept takes :data:`TRACE_REWORK_EXHAUSTED` instead.
 TRACE_FINDINGS_WITHOUT_A_PATH = "rework (no gating finding names a path)"
 
+#: Prefix of the ``send_trace`` label for a stage that ran on a provider other than the one it was
+#: routed to; the rest of the label says which and why. Sent as its own trace beside the node's
+#: ordinary one, because it qualifies the result rather than replacing it — a critic pinned to a
+#: second model that silently ran on the first one passed, but not as the check the flow planned.
+TRACE_PROVIDER_FALLBACK = "ran on a fallback provider"
+
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
 #: sentence for the operator-facing terminal notification. These tokens are code-path
 #: identifiers, never written to be read; :func:`terminal_reason_prose` turns the known ones into

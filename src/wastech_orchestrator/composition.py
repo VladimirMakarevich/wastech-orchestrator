@@ -80,7 +80,12 @@ def build_internal_deny_policy(
     return InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
-        env_file=env_file,
+        # Absolute, always: the adapters project these into sandbox policy, and Codex refuses a
+        # relative filesystem key outright ("must be absolute") — so `--config .worc/config.yaml`,
+        # which derives the env-file as `.worc/.env`, failed every Codex attempt in one second and
+        # fell back to the other provider. Resolved against this process's working directory,
+        # which is what the relative path meant when the operator typed it.
+        env_file=env_file.absolute() if env_file is not None else None,
         runs_home=layout.runs_home,
     )
 

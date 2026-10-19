@@ -70,7 +70,11 @@ from wastech_orchestrator.core.supervisor_packet import (
     build_packet_facts,
     render_packet,
 )
-from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
+from wastech_orchestrator.core.supervisor_usage import (
+    SupervisorFunction,
+    summarize_spend,
+    summarize_task_spend,
+)
 from wastech_orchestrator.git_manager import GitControlState
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import (
@@ -1455,7 +1459,9 @@ class Supervisor:
         if not summary_text and self._existing_summary_nonempty(path):
             return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
-        usage, gaps = self._spend_report(task_id)
+        usage, gaps, task_usage = self._spend_report(task_id)
+        if task_usage is not None:
+            payload["task_usage"] = task_usage
         if usage is not None:
             payload["supervisor_usage"] = usage
         if gaps:
@@ -1471,8 +1477,11 @@ class Supervisor:
             return
         self._register(task_id, "summary_json", str(path))
 
-    def _spend_report(self, task_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        """This layer's own spend, and what the task's cost figures do not account for.
+    def _spend_report(
+        self, task_id: str
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None]:
+        """This layer's own spend, what the task's cost figures do not account for, and the whole
+        task's spend (every node attempt plus this layer).
 
         Both from one read of the attempt rows, because the second qualifies the first: the cost in
         the usage report is summed from a column one shipped provider never fills, so a run that
@@ -1488,8 +1497,12 @@ class Supervisor:
                 "supervisor usage report could not be built (advisory, ignored)",
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
             )
-            return None, []
-        return summarize_spend(attempts), gap_json(cost_gaps(attempts))
+            return None, [], None
+        return (
+            summarize_spend(attempts),
+            gap_json(cost_gaps(attempts)),
+            summarize_task_spend(attempts),
+        )
 
     @staticmethod
     def _existing_summary_nonempty(path: Path) -> bool:

@@ -58,6 +58,7 @@ from wastech_orchestrator.core.orchestrator import (
     RerunPlan,
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status
+from wastech_orchestrator.core.supervisor_usage import summarize_task_spend
 from wastech_orchestrator.env_file import count_env_file, load_env_file
 from wastech_orchestrator.git_manager import (
     KIND_PR,
@@ -587,8 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const=True,
         default=None,
-        help="(--continue only) reset the consecutive fix-loop counters so an exhausted fix "
-        "budget runs again; the global max_total_fix_iterations backstop is unchanged. Also "
+        help="(--continue only) grant a fresh fix budget: reset the consecutive fix-loop "
+        "counters and every non-blocking evaluator's max_rework_per_stage count, so the resumed "
+        "run gets new fix rounds; the global max_total_fix_iterations backstop is unchanged. Also "
         "answers the exhausted-fix-budget confirmation prompt with yes, non-interactively",
     )
     reset_fix_budget_group.add_argument(
@@ -1068,10 +1070,12 @@ def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
     """
     explicit = getattr(args, "env_file", None)
     if explicit is not None:
-        return Path(explicit), True
+        return Path(explicit).absolute(), True
     config_path = resolve_config_path(args)
     if config_path is not None:
-        return Path(config_path).parent / ".env", False
+        # Absolute even when ``--config`` was relative: this path becomes a sandbox deny entry, and
+        # a relative one there is rejected by Codex rather than resolved.
+        return (Path(config_path).parent / ".env").absolute(), False
     info = detect.git_info(Path.cwd())
     if info is not None:
         return RuntimeLayout.default(info.root).private_home / ".env", False
@@ -1375,8 +1379,8 @@ def _runner_owner_note(pid: int) -> str:
     backs it up, so an operator reads one sentence whichever of the two refused.
     """
     return (
-        f"a 'run' is executing a task in this clone (pid {pid}); wait for it to finish, "
-        "or interrupt it where it runs"
+        f"a 'run' or 'rerun' is executing a task in this clone (pid {pid}); wait for it to "
+        "finish, or interrupt it where it runs"
     )
 
 
@@ -2146,8 +2150,9 @@ def _report_rerun_plan(plan: RerunPlan) -> None:
         print("  artifacts: kept; pending HITL prompt reset so the node re-asks")
         if plan.reset_fix_budget:
             print(
-                "  state:     terminal markers cleared; consecutive fix budget reset "
-                "(global backstop kept); subtasks/publish-ops kept"
+                "  state:     terminal markers cleared; consecutive fix budget and every "
+                "non-blocking evaluator's max_rework_per_stage count reset (global backstop "
+                "kept); subtasks/publish-ops kept"
             )
         else:
             print("  state:     terminal markers cleared; counters/subtasks/publish-ops kept")
@@ -2304,33 +2309,59 @@ def cmd_rerun(args: argparse.Namespace) -> int:
             print("rerun: aborted")
             return 0
 
-    if plan.restart_in_place:
-        assert plan.source_path is not None  # guarded by plan_rerun refusals
-        result = orchestrator.restart_task_in_place(args.task_id, source_path=plan.source_path)
-        label = "rerun/restart"
-    elif args.continue_:
+    resolved_reset = False
+    if args.continue_ and not plan.restart_in_place:
         resolved_reset, abort_code = _resolve_reset_fix_budget(
             args, plan, non_interactive=non_interactive
         )
         if abort_code is not None:
             return abort_code
-        result = orchestrator.continue_task(
-            args.task_id,
-            reset_fix_budget=resolved_reset,
-            from_node=args.from_node,
-        )
-        label = "rerun/continue"
-    else:
-        assert plan.source_path is not None  # guarded by plan_rerun refusals
-        result = orchestrator.rerun_task(
-            args.task_id,
-            source_path=plan.source_path,
-            force_reset_remote=args.force_reset_remote,
-        )
-        label = "rerun"
+    # Record this executor for the duration, exactly as `run` does: a rerun drives the pipeline
+    # in the shared clone for as long as a run would, and without the marker `status` / `list` /
+    # `top` read its task as `parked (no daemon)` — the label external monitoring took for a
+    # finished run while the node was still working. Exclusive, so a concurrent `run`/`rerun` that
+    # raced past the owner check above is refused here; reaped in `finally`.
+    runner_path = process_control.runner_file_path(worc_home_for(config))
+    try:
+        process_control.write_pid_file(runner_path, exclusive=True)
+    except process_control.ExecutorBusyError as busy:
+        print(f"rerun: {_runner_owner_note(busy.pid)}")
+        return 1
+    try:
+        result, label = _drive_rerun(orchestrator, args, plan, reset_fix_budget=resolved_reset)
+    finally:
+        runner_path.unlink(missing_ok=True)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} ({label})")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
+
+
+def _drive_rerun(
+    orchestrator: Orchestrator,
+    args: argparse.Namespace,
+    plan: RerunPlan,
+    *,
+    reset_fix_budget: bool,
+) -> tuple[PipelineResult, str]:
+    """Run the planned rerun mode; return its result and the label the summary line prints."""
+    if plan.restart_in_place:
+        assert plan.source_path is not None  # guarded by plan_rerun refusals
+        result = orchestrator.restart_task_in_place(args.task_id, source_path=plan.source_path)
+        return result, "rerun/restart"
+    if args.continue_:
+        result = orchestrator.continue_task(
+            args.task_id,
+            reset_fix_budget=reset_fix_budget,
+            from_node=args.from_node,
+        )
+        return result, "rerun/continue"
+    assert plan.source_path is not None  # guarded by plan_rerun refusals
+    result = orchestrator.rerun_task(
+        args.task_id,
+        source_path=plan.source_path,
+        force_reset_remote=args.force_reset_remote,
+    )
+    return result, "rerun"
 
 
 _FINALIZE_STATUS: dict[str, Status] = {
@@ -3506,7 +3537,14 @@ def run_preflight(
     fallback provider).
     """
     lines: list[str] = [_env_preflight_line(env_file)]
-    providers = build_providers(config, layout=layout_for(config))
+    # The same deny policy a run builds (with the resolved env-file), so the isolation smoke below
+    # proves the profile an attempt will actually launch under.
+    layout = layout_for(config)
+    providers = build_providers(
+        config,
+        layout=layout,
+        deny_policy=build_internal_deny_policy(layout, env_file=env_file),
+    )
     ok = True
     for pid in config.agents.allowed:
         provider = providers.get(pid)
@@ -4280,6 +4318,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 tasks = [] if latest is None else [latest]
         current_nodes = {t.task_id: store.get_flow_checkpoint(t.task_id)[0] for t in tasks}
         cost_notes = {t.task_id: _cost_gap_note(store, (t.task_id,)) for t in tasks}
+        cost_totals = {t.task_id: _task_cost_line(store, t.task_id) for t in tasks}
     finally:
         store.close()
 
@@ -4309,11 +4348,13 @@ def cmd_status(args: argparse.Namespace) -> int:
             updated = datetime.fromisoformat(task.updated_at)
             elapsed = max(0.0, (now - updated).total_seconds())
             print(f"elapsed_since_update_seconds={elapsed:.1f}")
+        cost_total = cost_totals.get(task.task_id)
+        if cost_total:
+            print(f"cost={cost_total}")
         cost_note = cost_notes.get(task.task_id)
         if cost_note:
-            # Not a cost report — this command prints no total. It is the other half of one: the
-            # attempts whose price is not in ``state.db`` at all, named so a later roll-up over
-            # these rows is not read as the task's whole bill.
+            # The other half of the total above: the attempts whose price is not in ``state.db``
+            # at all, named so the figure is not read as the task's whole bill.
             print(f"cost_not_accounted={cost_note}")
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
@@ -4851,6 +4892,30 @@ def _section_task_ids(
             if task_id:
                 seen.setdefault(task_id, None)
     return tuple(seen)
+
+
+def _task_cost_line(store: StateStore | None, task_id: str) -> str | None:
+    """``"$114.11 over 19 provider calls (Claude figures include subagents)"``, or ``None``.
+
+    The task's recorded spend — every node attempt and the supervisor layer — summed from the same
+    rows ``summary.json`` reports. Read-only and best-effort like the gap note beside it: a store
+    error yields no line rather than failing the view.
+    """
+    if store is None:
+        return None
+    try:
+        spend = summarize_task_spend(store.get_provider_attempts_for_task(task_id))
+    except sqlite3.Error:
+        return None
+    if spend is None:
+        return None
+    total = spend["total"]
+    cost = total.get("cost")
+    if not isinstance(cost, (int, float)):
+        return None
+    calls = total["calls"]
+    plural = "call" if calls == 1 else "calls"
+    return f"${cost:,.2f} over {calls} provider {plural} (Claude figures include subagents)"
 
 
 def _cost_gap_note(store: StateStore | None, task_ids: Sequence[str]) -> str | None:

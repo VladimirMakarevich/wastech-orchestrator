@@ -637,6 +637,11 @@ class SubtaskRow:
     artifact_path: str | None = None
 
 
+#: ``evaluations.kind`` of the marker an operator's ``rerun --continue --reset-fix-budget`` appends:
+#: in-flow ``rework`` verdicts before it no longer count against ``max_rework_per_stage``.
+REWORK_BUDGET_RESET = "rework_budget_reset"
+
+
 @dataclass(frozen=True)
 class EvaluationRow:
     """One immutable, append-only evaluation record.
@@ -651,8 +656,10 @@ class EvaluationRow:
     """
 
     task_id: str
-    kind: str  # in_flow_verdict | supervisor_step | supervisor_final
-    verdict: str  # accept | rework (in-flow); advisory (supervisor — never routes)
+    # in_flow_verdict | supervisor_step | supervisor_final | rework_budget_reset (an operator's
+    # budget grant: verdicts before it no longer count against ``max_rework_per_stage``)
+    kind: str
+    verdict: str  # accept | rework (in-flow); advisory (supervisor — never routes); reset (marker)
     findings_json: str = "[]"
     node_id: str | None = None
     source_node_run_id: int | None = None
@@ -1772,20 +1779,43 @@ class StateStore:
     ) -> int:
         """Count applied in-flow ``rework`` verdicts — the per-instance rework limit derives from
         this count, not a mutable counter. Scoped to ``node_id`` /
-        ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works)."""
+        ``subtask_order`` when given (``subtask_order`` matched with ``IS`` so ``NULL`` works).
+
+        Two things scope the count to the budget currently in force, without deleting from the
+        immutable table. Only verdicts whose ``node_runs`` row still exists count — a fresh
+        ``rerun`` deletes the attempt's node runs, so its spent rounds no longer carry into the new
+        attempt (the same scoping :meth:`consecutive_identical_findings` uses). And only verdicts
+        after the task's latest :data:`REWORK_BUDGET_RESET` marker count — the marker an operator's
+        ``rerun --continue --reset-fix-budget`` appends, so the grant reaches a non-blocking
+        evaluator's ``max_rework_per_stage`` as well as the engine's loop counters.
+        """
         sql = (
-            "SELECT COUNT(*) FROM evaluations "
-            "WHERE task_id = ? AND kind = 'in_flow_verdict' AND verdict = 'rework'"
+            "SELECT COUNT(*) FROM evaluations e "
+            "JOIN node_runs n ON n.id = e.source_node_run_id "
+            "WHERE e.task_id = ? AND e.kind = 'in_flow_verdict' AND e.verdict = 'rework' "
+            "AND e.id > COALESCE((SELECT MAX(r.id) FROM evaluations r "
+            "WHERE r.task_id = ? AND r.kind = ?), 0)"
         )
-        params: list[object] = [task_id]
+        params: list[object] = [task_id, task_id, REWORK_BUDGET_RESET]
         if node_id is not None:
-            sql += " AND node_id = ?"
+            sql += " AND e.node_id = ?"
             params.append(node_id)
         if subtask_order is not None:
-            sql += " AND subtask_order = ?"
+            sql += " AND e.subtask_order = ?"
             params.append(subtask_order)
         row = self._conn.execute(sql, params).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def record_rework_budget_reset(self, task_id: str) -> int:
+        """Append the marker that starts every non-blocking evaluator's rework count afresh.
+
+        Written by an operator's ``rerun --continue --reset-fix-budget`` alongside the engine's
+        consecutive loop counters, so "a fresh fix budget" means the same thing to both limits.
+        Append-only like every evaluation row: the earlier verdicts stay in the audit trail.
+        """
+        return self.record_evaluation(
+            EvaluationRow(task_id=task_id, kind=REWORK_BUDGET_RESET, verdict="reset")
+        )
 
     def consecutive_identical_findings(
         self,

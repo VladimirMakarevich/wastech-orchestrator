@@ -735,6 +735,79 @@ flow:
 """
 
 
+_PINNED_REVIEW_FLOW = _NON_BLOCKING_REVIEW_FLOW.replace(
+    "      max_rework_per_stage: 1\n", "      max_rework_per_stage: 1\n      provider: codex\n"
+)
+
+
+def test_a_pinned_provider_that_falls_back_is_loud_everywhere(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # `enrich-07b`: the critic was pinned to Codex so a second model would judge the material; Codex
+    # failed in one second on every pass and the stage quietly ran on Claude — a log line, nothing
+    # else. Now the operator hears it on the console and in Telegram, and the PR body says it.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.core.summary_report import PROVIDER_FALLBACKS_HEADING
+    from wastech_orchestrator.notify import TRACE_PROVIDER_FALLBACK
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_PINNED_REVIEW_FLOW, "utf-8")
+
+    providers = _both(
+        codex={"infra_fail": {"review"}, "infra_error_class": ErrorClass.PROCESS_CRASHED}
+    )
+    notifier = RecordingNotifier()
+    orch, _store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-pin"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # the result stands; it is the silence that changed
+    fallback_traces = [
+        c["outcome"]
+        for c in notifier.trace_calls
+        if c["node_id"] == "review" and c["outcome"].startswith(TRACE_PROVIDER_FALLBACK)
+    ]
+    assert fallback_traces and "codex" in fallback_traces[0] and "claude" in fallback_traces[0]
+    assert any("fallback provider" in m and "pinned" in m for m in messages)
+    body = (task_artifact_dir(art, "task-pin") / "summary.md").read_text(encoding="utf-8")
+    assert PROVIDER_FALLBACKS_HEADING in body
+    assert "`review`: routed to `codex` (pinned by the flow), ran on `claude`" in body
+    assert "`process_crashed`" in body
+
+
 def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

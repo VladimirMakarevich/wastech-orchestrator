@@ -30,6 +30,7 @@ from wastech_orchestrator.notify.interface import (
     TRACE_ADOPTED_COMMITS,
     TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
+    TRACE_PROVIDER_FALLBACK,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
     AskHandle,
@@ -637,6 +638,8 @@ _TRACE_EMOJI: dict[str, str] = {
 
 def _format_trace_message(*, task_id: str, node_id: str, outcome: str) -> str:
     emoji = _TRACE_EMOJI.get(outcome, "▶️")
+    if outcome.startswith(TRACE_PROVIDER_FALLBACK):
+        emoji = "⚠️"  # the label carries the providers, so it is matched by its fixed prefix
     return f"[{task_id}] {emoji} {node_id} → {outcome}"
 
 

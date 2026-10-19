@@ -116,7 +116,12 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolution
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.security_preamble import build_orchestrator_security_preamble
-from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
+from wastech_orchestrator.core.flow.snapshot import (
+    FlowLoadError,
+    FlowSnapshot,
+    load_flow,
+    reachable_nodes,
+)
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
@@ -153,14 +158,16 @@ from wastech_orchestrator.core.recovery import (
 )
 from wastech_orchestrator.core.state_machine import TERMINAL, Status, assert_transition
 from wastech_orchestrator.core.summary_report import (
-    SKIPPED_NODES_HEADING,
     SUMMARY_MD_FILENAME,
+    RunFacts,
+    render_provider_fallbacks_section,
+    render_run_cost_section,
     render_skipped_nodes_section,
     write_summary_report,
 )
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.core.supervisor_packet import build_packet_facts
-from wastech_orchestrator.core.supervisor_usage import summarize_spend
+from wastech_orchestrator.core.supervisor_usage import summarize_spend, summarize_task_spend
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
     ConflictedPath,
@@ -195,6 +202,7 @@ from wastech_orchestrator.notify import (
     TRACE_ADOPTED_COMMITS,
     TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
+    TRACE_PROVIDER_FALLBACK,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
     Notifier,
@@ -418,6 +426,9 @@ class RerunPlan:
     # flow's budgets — empty unless the resume will actually land in place with counters preserved.
     exhausted_fix_loops: tuple[ExhaustedLoop, ...] = ()
     global_backstop_exhausted: bool = False  # the hard max_total_fix_iterations ceiling is spent
+    # Non-blocking evaluators on the resume path whose `max_rework_per_stage` count is spent, as
+    # ``"node (used/cap)"`` — they accept on their next pass unless the budget is reset.
+    spent_advisory_gates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -751,6 +762,11 @@ def _render_governance_section(paths: tuple[str, ...]) -> str:
 # --- Terminal-notification enrichment (read the on-disk diagnosis for the operator) --------------
 
 _FINDING_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+
+
+def _str_or_none(value: object) -> str | None:
+    """*value* when it is a non-empty string, else ``None`` — for best-effort report fields."""
+    return value if isinstance(value, str) and value else None
 
 
 def _read_failure_report(path: str | None) -> dict[str, Any] | None:
@@ -1576,6 +1592,7 @@ class Orchestrator:
             refusals.append("--from requires --continue")
         exhausted: tuple[ExhaustedLoop, ...] = ()
         backstop_exhausted = False
+        spent_gates: tuple[str, ...] = ()
         if continue_mode and current_node:
             live = self._persisted_flow_snapshot(task_id)
             resume_node = from_node or current_node
@@ -1609,6 +1626,13 @@ class Orchestrator:
                 backstop_exhausted = global_backstop_exhausted(
                     live.doc.budgets, self._config.agents.max_total_fix_iterations, counters
                 )
+                spent_gates = self._spent_advisory_gates(task_id, live, resume_node)
+                if spent_gates and reset_fix_budget is not True:
+                    notes.append(
+                        f"max_rework_per_stage is spent for {', '.join(spent_gates)}: without "
+                        "--reset-fix-budget each accepts on its next pass WITHOUT another fix "
+                        "round — a full evaluator run that changes nothing"
+                    )
         restart_in_place = False
         display_branch = row.branch
         if not continue_mode:
@@ -1664,8 +1688,28 @@ class Orchestrator:
             refusals=tuple(refusals),
             exhausted_fix_loops=exhausted,
             global_backstop_exhausted=backstop_exhausted,
+            spent_advisory_gates=spent_gates,
             restart_in_place=restart_in_place,
         )
+
+    def _spent_advisory_gates(
+        self, task_id: str, snapshot: FlowSnapshot, start: str
+    ) -> tuple[str, ...]:
+        """Non-blocking evaluators on the resume path whose ``max_rework_per_stage`` is spent.
+
+        Such a gate accepts on its next pass without another fix round unless the operator grants
+        ``--reset-fix-budget`` — a full paid pass that changes nothing — so the rerun plan names
+        them rather than leaving the operator to find out from the bill.
+        """
+        spent = []
+        for node_id in reachable_nodes(snapshot, start):
+            node = snapshot.nodes_by_id[node_id]
+            if not isinstance(node, EvaluatorNode) or node.blocking:
+                continue
+            used = self._store.count_rework_verdicts(task_id, node_id=node_id)
+            if used >= node.max_rework_per_stage:
+                spent.append(f"{node_id} ({used}/{node.max_rework_per_stage})")
+        return tuple(spent)
 
     def rerun_task(
         self, task_id: str, *, source_path: str, force_reset_remote: bool = False
@@ -1849,6 +1893,11 @@ class Orchestrator:
             self._store.save_counters(
                 task_id, replace(counters, test_fix_cycles=0, review_fix_cycles=0)
             )
+            # The same grant for the other limit a fix round answers to: a non-blocking
+            # evaluator's `max_rework_per_stage`, counted from its recorded verdicts. Without it the
+            # grant reached the loop counters only, and the resumed evaluator — its per-stage count
+            # still spent — accepted at once: a full paid pass and not one fix round.
+            self._store.record_rework_budget_reset(task_id)
         self._log(task_id).info(
             "rerun --continue: applied controls",
             extra={
@@ -3943,7 +3992,8 @@ class Orchestrator:
                     "task finalize: summary degraded to deterministic fallback "
                     "(no provider-authored synthesis)"
                 )
-        self._append_skip_section(p)  # note skipped nodes on the supervisor summary (idempotent)
+        # Skipped nodes, provider fallbacks and the run cost on the supervisor summary (idempotent).
+        self._append_fact_sections(p)
         log.info("task finalize: publish prep (committed summary + task-file move)")
         summary_md = self._finalize_task_artifacts(p, Status.DONE, degraded=degraded)
         return str(summary_md) if summary_md is not None else None
@@ -4250,8 +4300,9 @@ class Orchestrator:
             if isinstance(node, EvaluatorNode) and outcome.rework_exhausted:
                 rework_exhausted = True
                 self._log(p.task.id).warning(
-                    "evaluator accepted after exhausting its rework budget — continuing; "
+                    "evaluator accepted after exhausting its rework budget (%s) — continuing; "
                     "stage may need follow-up",
+                    outcome.rework_limit or "max_rework_per_stage",
                     extra={
                         "stage": node.id,
                         "max_rework_per_stage": node.max_rework_per_stage,
@@ -4320,6 +4371,23 @@ class Orchestrator:
                         "first_finding": _first_finding_reason(outcome.findings),
                     },
                 )
+            # The stage ran on a provider other than the one it was routed to. Loud on every path,
+            # because the result is real but not the one the flow planned: a node pinned to a
+            # second model (a cross-check by a different lens) that silently ran on the first one
+            # still "passed". Warned and traced separately from the node's own outcome.
+            if outcome.provider_fallback is not None:
+                self._log(p.task.id).warning(
+                    "node ran on a fallback provider — %s; its result stands, but it is not the "
+                    "run the flow planned",
+                    outcome.provider_fallback,
+                    extra={"stage": node.id},
+                )
+                if self._config.telegram.trace:
+                    self._notifier.send_trace(
+                        task_id=p.task.id,
+                        node_id=node.id,
+                        outcome=f"{TRACE_PROVIDER_FALLBACK}: {outcome.provider_fallback}",
+                    )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
@@ -4512,22 +4580,26 @@ class Orchestrator:
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
-    def _append_skip_section(self, p: _Pipeline) -> None:
-        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run).
+    def _append_fact_sections(self, p: _Pipeline) -> None:
+        """Append the deterministic fact sections to ``summary.md`` (idempotent within a run).
 
-        Only a provider-authored body needs this: the deterministic report renders the same section
-        from the same renderer, so the heading — which is also the idempotency key — exists once.
+        Skipped nodes, provider fallbacks and the run's cost. Only a provider-authored body needs
+        this: the deterministic report renders the same sections from the same renderers, so each
+        heading — which is also the idempotency key — exists once.
         """
-        if not p.skip:
-            return
         md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
             return
+        sections = [render_skipped_nodes_section(p.skip)] if p.skip else []
+        sections += self._fact_sections(
+            p.task.id, self._store.get_provider_attempts_for_task(p.task.id)
+        )
         existing = md_path.read_text(encoding="utf-8")
-        if SKIPPED_NODES_HEADING in existing:
+        missing = [s for s in sections if s.splitlines()[0] not in existing]
+        if not missing:
             return
         md_path.write_text(
-            existing.rstrip("\n") + "\n\n" + render_skipped_nodes_section(p.skip),
+            existing.rstrip("\n") + "\n\n" + "\n".join(missing),
             encoding="utf-8",
             newline="",
         )
@@ -4623,7 +4695,25 @@ class Orchestrator:
             # cost total summed from the column is partial whenever the flow used it. Stated, never
             # estimated.
             cost_gaps=cost_gaps(attempts),
+            run_facts=RunFacts(
+                task_usage=summarize_task_spend(attempts),
+                sections=tuple(self._fact_sections(p.task.id, attempts)),
+            ),
         )
+
+    def _fact_sections(self, task_id: str, attempts: Sequence[ProviderAttemptRow]) -> list[str]:
+        """The deterministic fact blocks every pull-request body carries, whoever wrote the prose.
+
+        Provider fallbacks and the run's recorded cost: both are facts the reader of the change
+        needs and neither is the summary's to paraphrase — a critic pinned to a second model that
+        ran on the first one, or a bill read off a partial total, must not depend on a prose turn
+        choosing to mention it.
+        """
+        sections = [
+            render_provider_fallbacks_section(self._store.get_node_runs(task_id), attempts),
+            render_run_cost_section(attempts),
+        ]
+        return [section for section in sections if section]
 
     def _task_ref(self, p: _Pipeline) -> str | None:
         """A short sibling-relative pointer to the task file for the committed summary.
@@ -5817,6 +5907,7 @@ class Orchestrator:
         recovered_loop: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
+        report = _read_failure_report(task_row.failure_report_path if task_row else None) or {}
         # Derived here, from the ledger, at the moment of the append — not carried from whenever a
         # rerun was planned. The carried value was a per-process map that nothing ever cleared, so
         # every later terminal of the same id in that process reused it: one run's ledger shows
@@ -5848,5 +5939,12 @@ class Orchestrator:
                 advanced_mode=self._advanced_mode,
                 recovered_from_stuck=recovered_loop is not None,
                 recovered_loop=recovered_loop,
+                stop_node=_str_or_none(report.get("node_id")) if final is not Status.DONE else None,
+                stuck_loop=_str_or_none(report.get("loop")) if final is not Status.DONE else None,
+                stuck_limit=(
+                    _str_or_none(report.get("limit_exhausted"))
+                    if final is not Status.DONE
+                    else None
+                ),
             )
         )

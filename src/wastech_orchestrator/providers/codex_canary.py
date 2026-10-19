@@ -43,7 +43,7 @@ from wastech_orchestrator.providers._adapter_base import (
     CAPABILITY_POLICY_FAILED,
     CAPABILITY_UNSUPPORTED,
 )
-from wastech_orchestrator.providers.base import ErrorClass
+from wastech_orchestrator.providers.base import ErrorClass, ProviderError
 from wastech_orchestrator.providers.codex_profile import (
     PROFILE_NAME,
     build_codex_permission_profile,
@@ -84,6 +84,28 @@ _CAPABILITY_MARKERS: tuple[str, ...] = (
     "seatbelt",
     "landlock",
 )
+
+
+# Substrings of Codex refusing the generated profile itself — a config it will not load — before
+# any probe command runs. Every probe then "fails", and read as a capability gap that was waved
+# through in the advanced mode, after which ``codex exec`` hit the same refusal in one second and
+# the stage silently fell back to the other provider. It is our profile, so it is ours to fix: a
+# configuration error, never a host verdict.
+_PROFILE_REJECTED_MARKERS: tuple[str, ...] = (
+    "must be absolute",
+    "error loading config",
+    "failed to load config",
+    "invalid configuration",
+    "unknown variant",
+    "unknown field",
+    "invalid type:",
+)
+
+
+def _first_line(output: str) -> str:
+    """The first non-blank line of a CLI's output, bounded — the CLI's own one-line reason."""
+    line = next((text.strip() for text in output.splitlines() if text.strip()), "")
+    return line[:300]
 
 
 @dataclass(frozen=True)
@@ -445,6 +467,7 @@ def _classify_probe(
     denied: bool,
     lowered: str,
     evidence: list[dict[str, object]],
+    output: str = "",
 ) -> CanaryOutcome | None:
     """One probe's failing verdict, or ``None`` when the probe holds and the loop continues.
 
@@ -456,6 +479,18 @@ def _classify_probe(
     five runs falling back. Only the runner's own marker (``codex sandbox`` itself failed to launch
     or timed out) stays a host verdict for that probe.
     """
+    if denied and any(marker in lowered for marker in _PROFILE_REJECTED_MARKERS):
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CONFIGURATION_ERROR,
+            message=(
+                "permission-profile canary FAILED: codex rejected the generated profile before "
+                f"running probe {probe.label!r} — {_first_line(output or lowered)!r}. "
+                "`codex exec` would refuse the same profile, so the attempt is stopped here "
+                "instead of falling back"
+            ),
+            evidence=tuple(evidence),
+        )
     if (
         denied
         and not probe.expect_denied
@@ -569,7 +604,9 @@ def run_codex_canary(
             evidence.append(
                 {"probe": probe.label, "expect_denied": probe.expect_denied, "denied": denied}
             )
-            verdict = _classify_probe(probe, denied=denied, lowered=lowered, evidence=evidence)
+            verdict = _classify_probe(
+                probe, denied=denied, lowered=lowered, evidence=evidence, output=output
+            )
             if verdict is not None:
                 return verdict
             # The positive control screens the *read* harness: the deny probes are reads, and the
@@ -654,6 +691,8 @@ def run_codex_capability_smoke(
     system: str | None = None,
     runner: CanaryRunner = default_canary_runner,
     inventory_probe: InventoryProbe | None = None,
+    attempt_deny: InternalDenyPolicy | None = None,
+    denied_read_paths: Sequence[str] = (),
 ) -> CapabilitySmokeReport:
     """No-model, real-``codex sandbox`` capability smoke for the generated ``worc`` profile.
 
@@ -676,6 +715,12 @@ def run_codex_capability_smoke(
     mode) that profile grants ``write`` on the whole volume, which is exactly the configuration
     whose carve-outs are worth demonstrating: a smoke that quietly proved the stricter profile
     instead would report a floor nobody runs under.
+
+    ``attempt_deny`` / ``denied_read_paths`` are the deny entries a real attempt adds beyond the
+    fixture's own private home — the resolved env-file, the runs home, the operator's blacklist —
+    carried into the smoke's profile verbatim, so the smoke proves the profile the attempt will
+    launch rather than a smaller one. A smoke without them reported "isolation probe OK" for a
+    profile whose relative env-file entry Codex then refused on every real attempt.
     """
     sys_name = system if system is not None else platform.system()
     root = Path(tempfile.mkdtemp(prefix="worc-cap-smoke-", dir=str(home_dir)))
@@ -719,7 +764,8 @@ def run_codex_capability_smoke(
         deny = InternalDenyPolicy(
             control_home=control,
             private_home=control,
-            env_file=None,
+            env_file=attempt_deny.env_file if attempt_deny is not None else None,
+            runs_home=attempt_deny.runs_home if attempt_deny is not None else None,
         )
         write_guard = ProviderWriteGuardPolicy(
             exchange_root=exchange,
@@ -728,18 +774,25 @@ def run_codex_capability_smoke(
             hooks_dir=git_dir / "hooks",
             tasks_dir=repo / "tasks",
         )
-        profile = build_codex_permission_profile(
-            permission_profile=permission_profile,
-            working_directory=str(repo),
-            deny_policy=deny,
-            write_guard=write_guard if writable else None,
-            denied_read_paths=(),
-            # Same profile the attempt would launch under, network included: the advanced mode is
-            # online, and proving a profile that differs from the real one in any key is what this
-            # check exists to stop. The probes are local commands either way.
-            network_access=not strict_isolation,
-            strict_isolation=strict_isolation,
-        )
+        try:
+            profile = build_codex_permission_profile(
+                permission_profile=permission_profile,
+                working_directory=str(repo),
+                deny_policy=deny,
+                write_guard=write_guard if writable else None,
+                denied_read_paths=tuple(denied_read_paths),
+                # Same profile the attempt would launch under, network included: the advanced mode
+                # is online, and proving a profile that differs from the real one in any key is
+                # what this check exists to stop. The probes are local commands either way.
+                network_access=not strict_isolation,
+                strict_isolation=strict_isolation,
+            )
+        except ProviderError as exc:
+            # The generator itself refused the operator's entries (an unbounded glob under strict
+            # isolation): every real attempt would refuse the same way, so preflight says so.
+            return CapabilitySmokeReport(
+                CAPABILITY_POLICY_FAILED, f"codex {permission_profile} sandbox: {exc}"
+            )
         # Assert the fixture before trusting its verdict: a root with no directory yields no probe,
         # and a smoke that quietly probed fewer roots than the profile declares would certify a
         # floor it never tested. Undemonstrable, therefore — never ``passed``.

@@ -64,6 +64,7 @@ from wastech_orchestrator.providers.errors import (
     make_signatures,
     message_for,
 )
+from wastech_orchestrator.providers.process import SettleWatch
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
@@ -1432,9 +1433,12 @@ def attempt_has_shell(
 
 
 def _normalize_claude_usage(
-    usage: Mapping[str, Any] | None, *, total_cost_usd: object = None
+    usage: Mapping[str, Any] | None,
+    *,
+    total_cost_usd: object = None,
+    model_usage: Mapping[str, Any] | None = None,
 ) -> NormalizedUsage | None:
-    """Map Claude's raw ``usage`` to the provider-neutral per-invocation record.
+    """Map Claude's raw usage to the provider-neutral per-invocation record.
 
     Claude splits input across three sibling counts that are never pre-summed — the true input is
     ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens`` — and folds reasoning
@@ -1442,12 +1446,23 @@ def _normalize_claude_usage(
     cumulative). ``total_cost_usd`` is the per-invocation dollar figure the terminal ``result``
     event carries as a **sibling** of ``usage``; it rides the same per-invocation scope, so
     no baseline subtraction applies. Returns ``None`` when no usage was emitted.
+
+    The counts come from ``model_usage`` (the result's ``modelUsage``) when it is present: one entry
+    per model the session used — the main agent and every subagent — whose ``costUSD`` values sum
+    to ``total_cost_usd``. The sibling ``usage`` covers the main agent's last turn alone, so a run
+    that spent $14 across four subagents reported 0.41 M tokens beside the full cost; tokens and
+    cost now describe the same work.
     """
-    if not usage:
+    totals = _sum_model_usage(model_usage) if model_usage else None
+    if totals is not None:
+        uncached_input, cache_write, cache_read, output = totals
+    elif usage:
+        uncached_input = coerce_usage_int(usage.get("input_tokens"))
+        cache_write = coerce_usage_int(usage.get("cache_creation_input_tokens"))
+        cache_read = coerce_usage_int(usage.get("cache_read_input_tokens"))
+        output = coerce_usage_int(usage.get("output_tokens"))
+    else:
         return None
-    uncached_input = coerce_usage_int(usage.get("input_tokens"))
-    cache_write = coerce_usage_int(usage.get("cache_creation_input_tokens"))
-    cache_read = coerce_usage_int(usage.get("cache_read_input_tokens"))
     input_parts = [part for part in (uncached_input, cache_write, cache_read) if part is not None]
     return NormalizedUsage(
         scope=UsageScope.PER_INVOCATION,
@@ -1455,10 +1470,194 @@ def _normalize_claude_usage(
         cache_read=cache_read,
         cache_write=cache_write,
         uncached_input=uncached_input,
-        output_total=coerce_usage_int(usage.get("output_tokens")),
+        output_total=output,
         reasoning_output=None,
         cost=coerce_usage_cost(total_cost_usd),
     )
+
+
+def _sum_model_usage(
+    model_usage: Mapping[str, Any],
+) -> tuple[int | None, int | None, int | None, int | None] | None:
+    """``(uncached input, cache write, cache read, output)`` summed over every model entry.
+
+    ``None`` when no entry carries a single readable count, so the caller falls back to ``usage``
+    rather than reporting a run as having used nothing.
+    """
+    columns = ("inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens", "outputTokens")
+    sums: list[int | None] = [None, None, None, None]
+    for entry in model_usage.values():
+        if not isinstance(entry, Mapping):
+            continue
+        for index, key in enumerate(columns):
+            value = coerce_usage_int(entry.get(key))
+            if value is not None:
+                sums[index] = (sums[index] or 0) + value
+    if all(value is None for value in sums):
+        return None
+    return sums[0], sums[1], sums[2], sums[3]
+
+
+#: Terminal ``task_notification`` statuses that mean a background task finished on its own. Any
+#: other ending (``stopped`` — the CLI tore it down at exit — or no notification at all) means its
+#: result never reached the agent.
+_BACKGROUND_TASK_FINISHED = frozenset({"completed", "failed"})
+
+
+class _BackgroundTasks:
+    """The backgrounded subagents a Claude run started, and how each one ended.
+
+    In ``-p`` mode the CLI stops every background task when the agent ends its turn, so an agent
+    that launches subagents with ``run_in_background`` and then says "waiting for the results" ends
+    the run with a promise instead of the work (``enrich-07b``, nodes ``thinkers`` and ``stories``:
+    four subagents each, all ``stopped``, an 87-character final message accepted as done). Only
+    subagents (``local_agent``) count: a backgrounded shell the CLI reaps at exit — a watcher, a dev
+    server — is housekeeping, not the work.
+    """
+
+    def __init__(self) -> None:
+        self._started: dict[str, str] = {}
+        self._ended: dict[str, str] = {}
+        self._killed_by_runtime = 0
+
+    def feed(self, event: Mapping[str, Any]) -> None:
+        subtype = event.get("subtype")
+        task_id = event.get("task_id")
+        if subtype == "task_started" and isinstance(task_id, str):
+            is_agent = event.get("task_type") == "local_agent" or "subagent_type" in event
+            if event.get("is_backgrounded") is True and is_agent:
+                self._started[task_id] = str(event.get("description") or task_id)
+        elif subtype == "task_notification" and isinstance(task_id, str):
+            self._ended[task_id] = str(event.get("status") or "")
+        if event.get("type") == "result":
+            stats = event.get("subagent_stats")
+            killed = stats.get("killed") if isinstance(stats, Mapping) else None
+            system = killed.get("system") if isinstance(killed, Mapping) else None
+            if isinstance(system, int) and not isinstance(system, bool):
+                self._killed_by_runtime = max(self._killed_by_runtime, system)
+
+    @property
+    def pending(self) -> bool:
+        """A backgrounded subagent has started and not yet reported an ending."""
+        return any(task_id not in self._ended for task_id in self._started)
+
+    def abandoned(self) -> tuple[str, ...]:
+        """One label per backgrounded subagent the run ended without, in start order."""
+        lost = tuple(
+            f"{label} ({self._ended.get(task_id) or 'still running at exit'})"
+            for task_id, label in self._started.items()
+            if self._ended.get(task_id) not in _BACKGROUND_TASK_FINISHED
+        )
+        if lost:
+            return lost
+        # A CLI that reports the tally but not the per-task events still says how many it killed.
+        return tuple(
+            f"background subagent {n} (stopped by the CLI at exit)"
+            for n in range(1, self._killed_by_runtime + 1)
+        )
+
+
+#: The env switch the Claude Code CLI reads to disable background tasks (``run_in_background``
+#: subagents and shells, auto-backgrounding). Set by the adapter unless
+#: ``agents.providers.claude.background_tasks`` is true.
+_DISABLE_BACKGROUND_TASKS_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+#: Seconds of silence after a final ``result`` before the adapter stops a CLI that did not exit.
+#: A healthy run exits within a second of that event; two minutes leaves room for a slow flush
+#: and still turns a stuck tail from "until the node timeout" into minutes.
+_RESULT_IDLE_SECONDS = 120.0
+
+#: Stream events that may follow a final ``result`` without meaning more work is coming.
+_AFTER_RESULT_HOUSEKEEPING = frozenset(
+    {("system", "post_turn_summary"), ("system", "task_summary"), ("rate_limit_event", None)}
+)
+
+
+class ClaudeSettleTracker:
+    """Says when a Claude ``stream-json`` run is finished even though the process has not exited.
+
+    Settled means: the latest event is a terminal ``result`` (followed by nothing but the CLI's own
+    bookkeeping) and no backgrounded subagent is still out. A subagent still running means the CLI
+    will wake the agent again when it reports, so a ``result`` before that is not the last one.
+    """
+
+    def __init__(self) -> None:
+        self._background = _BackgroundTasks()
+        self._after_result = False
+
+    def feed(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        self._background.feed(event)
+        kind = (event.get("type"), event.get("subtype"))
+        if event.get("type") == "result":
+            self._after_result = True
+        elif event.get("type") == "command_lifecycle":
+            # A new command starting is a new turn; its completion is the tail of the old one.
+            if event.get("state") != "completed":
+                self._after_result = False
+        elif kind not in _AFTER_RESULT_HOUSEKEEPING:
+            self._after_result = False
+
+    @property
+    def settled(self) -> bool:
+        return self._after_result and not self._background.pending
+
+
+@dataclass
+class _Terminal:
+    """What the run's ``result`` events said, folded in stream order — the last one decides.
+
+    The structured output is the exception: it is the last one *any* result carried, because a
+    closing prose turn after the ``StructuredOutput`` call carries none.
+    """
+
+    seen: bool = False
+    succeeded: bool = False
+    failure_subtype: str | None = None
+    final_message: str | None = None
+    structured_output: dict[str, Any] | None = None
+    usage: dict[str, Any] | None = None
+    model_usage: Mapping[str, Any] | None = None
+    # The per-invocation dollar cost the terminal ``result`` event carries as a sibling of
+    # ``usage`` (not inside it), so it is captured separately and threaded into the normalizer.
+    total_cost_usd: object = None
+    rate_limited: bool = False
+
+    def fold(self, event: Mapping[str, Any], rate_limit_event: dict[str, Any] | None) -> None:
+        self.seen = True
+        subtype = str(event.get("subtype", _SUCCESS_SUBTYPE)).lower()
+        is_error = bool(event.get("is_error", subtype != _SUCCESS_SUBTYPE))
+        self.succeeded = (not is_error) and subtype == _SUCCESS_SUBTYPE
+        self.failure_subtype = None if self.succeeded else subtype
+        text = event.get("result")
+        if isinstance(text, str):
+            self.final_message = text
+        output = event.get("structured_output")
+        if isinstance(output, dict):
+            self.structured_output = output
+        run_usage = event.get("usage")
+        if isinstance(run_usage, dict):
+            self.usage = run_usage
+        per_model = event.get("modelUsage")
+        if isinstance(per_model, Mapping) and per_model:
+            self.model_usage = per_model
+        if "total_cost_usd" in event:
+            self.total_cost_usd = event.get("total_cost_usd")
+        # A subscription/usage rate-limit terminal: HTTP 429, a rejected ``rate_limit_event``,
+        # or a "session limit … resets" banner. Recognized only on an error terminal so a
+        # normal run is never misread. The adapter RAISES it as RATE_LIMITED.
+        limit_signal = (
+            str(event.get("api_error_status")) == "429"
+            or _is_limit_event(rate_limit_event)
+            or (isinstance(text, str) and bool(_LIMIT_BANNER.search(text)))
+        )
+        if is_error and limit_signal:
+            self.rate_limited = True
 
 
 def parse_stream_json(stdout_text: str) -> ParsedEvents:
@@ -1466,19 +1665,17 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
 
     Tolerant of stray non-JSON lines as long as a recognizable terminal ``result`` event is present.
     Raises :class:`ProviderError` (``INVALID_OUTPUT``) when no terminal event can be found.
+
+    A run whose agent turn wakes again (a background task finished) emits several ``result`` events;
+    the last one is the run's verdict (see :class:`_Terminal`). Token usage is read from the last
+    result's ``modelUsage`` (every model the session used, subagents included — the same scope as
+    ``total_cost_usd``), falling back to its ``usage`` (the last turn of the main agent alone) only
+    when ``modelUsage`` is absent.
     """
-    final_message: str | None = None
-    structured_output: dict[str, Any] | None = None
-    usage: dict[str, Any] | None = None
-    # The per-invocation dollar cost the terminal ``result`` event carries as a sibling of
-    # ``usage`` (not inside it), so it is captured separately and threaded into the normalizer.
-    total_cost_usd: object = None
+    terminal = _Terminal()
     session_id: str | None = None
-    terminal_seen = False
-    succeeded = False
-    failure_subtype: str | None = None
-    rate_limited = False
     rate_limit_event: dict[str, Any] | None = None
+    background = _BackgroundTasks()
 
     for line in stdout_text.splitlines():
         stripped = line.strip()
@@ -1490,6 +1687,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
             continue  # tolerated only if a terminal event is still found below
         if not isinstance(event, dict):
             continue
+        background.feed(event)
         event_type = str(event.get("type", ""))
         if "session_id" in event:
             session_id = event.get("session_id", session_id)
@@ -1501,46 +1699,26 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         if isinstance(nested_rle, dict):
             rate_limit_event = nested_rle
         if event_type == "result":
-            terminal_seen = True
-            subtype = str(event.get("subtype", _SUCCESS_SUBTYPE)).lower()
-            is_error = bool(event.get("is_error", subtype != _SUCCESS_SUBTYPE))
-            succeeded = (not is_error) and subtype == _SUCCESS_SUBTYPE
-            failure_subtype = None if succeeded else subtype
-            text = event.get("result")
-            if isinstance(text, str):
-                final_message = text
-            output = event.get("structured_output")
-            if isinstance(output, dict):
-                structured_output = output
-            run_usage = event.get("usage")
-            if isinstance(run_usage, dict):
-                usage = run_usage
-            if "total_cost_usd" in event:
-                total_cost_usd = event.get("total_cost_usd")
-            # A subscription/usage rate-limit terminal: HTTP 429, a rejected ``rate_limit_event``,
-            # or a "session limit … resets" banner. Recognized only on an error terminal so a
-            # normal run is never misread. The adapter RAISES it as RATE_LIMITED.
-            limit_signal = (
-                str(event.get("api_error_status")) == "429"
-                or _is_limit_event(rate_limit_event)
-                or (isinstance(text, str) and bool(_LIMIT_BANNER.search(text)))
-            )
-            if is_error and limit_signal:
-                rate_limited = True
+            terminal.fold(event, rate_limit_event)
 
-    if not terminal_seen:
+    if not terminal.seen:
         raise ProviderError(ErrorClass.INVALID_OUTPUT, message_for(ErrorClass.INVALID_OUTPUT))
 
     return ParsedEvents(
-        final_message=final_message,
-        structured_output=structured_output,
-        usage=usage,
-        normalized_usage=_normalize_claude_usage(usage, total_cost_usd=total_cost_usd),
+        final_message=terminal.final_message,
+        structured_output=terminal.structured_output,
+        usage=terminal.usage,
+        normalized_usage=_normalize_claude_usage(
+            terminal.usage,
+            total_cost_usd=terminal.total_cost_usd,
+            model_usage=terminal.model_usage,
+        ),
         session_id=session_id,
-        succeeded=succeeded,
-        failure_subtype=failure_subtype,
-        rate_limited=rate_limited,
+        succeeded=terminal.succeeded,
+        failure_subtype=terminal.failure_subtype,
+        rate_limited=terminal.rate_limited,
         rate_limit_resets_at=_limit_resets_at(rate_limit_event),
+        abandoned_work=background.abandoned(),
     )
 
 
@@ -1558,9 +1736,15 @@ class ClaudeCodeProvider(BaseCliProvider):
         config: ProviderConfig,
         *,
         sandbox_probe: SandboxProbe | None = None,
+        result_idle_seconds: float | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(config, **kwargs)
+        # How long the CLI may stay silent after its final result before it is stopped (see
+        # :meth:`_settle_watch`); injectable so a test need not wait out the production window.
+        self._result_idle_seconds = (
+            _RESULT_IDLE_SECONDS if result_idle_seconds is None else result_idle_seconds
+        )
         # The host Bash-sandbox capability seam. ``None`` resolves the real host at call
         # time (so a test can monkeypatch ``default_sandbox_probe``); tests inject a concrete probe
         # to exercise every platform branch deterministically on any CI host.
@@ -1568,6 +1752,35 @@ class ClaudeCodeProvider(BaseCliProvider):
 
     def _executable_label(self) -> str:
         return "claude"
+
+    def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
+        """Switch background tasks off unless the operator opted into them.
+
+        In headless ``-p`` mode the CLI stops every background task when the agent ends its turn, so
+        an agent that fans out in the background and then "waits for the results" ends the run with
+        a promise instead of the work. With the switch set the agent's subagents run in the
+        foreground — several launched in one message still run in parallel — and the turn ends only
+        once they have reported.
+        """
+        if not self._config.background_tasks:
+            env[_DISABLE_BACKGROUND_TASKS_ENV] = "1"
+        return env
+
+    def _settle_watch(self, request: AgentRunRequest) -> SettleWatch | None:
+        """Stop a CLI that wrote its final result and then went silent instead of exiting.
+
+        ``enrich-07b``, ``sources_gate`` run 99: the structured result was written at 16:15:25,
+        every background task had finished, and the process sat idle until 16:34:17 — nineteen
+        minutes the run waited for nothing. The tracker calls the stream settled once its last event
+        is a ``result`` and no backgrounded subagent is still out; the runner then allows
+        :data:`_RESULT_IDLE_SECONDS` of silence before stopping the process.
+        """
+        idle = self._result_idle_seconds
+        return SettleWatch(
+            make_tracker=ClaudeSettleTracker,
+            idle_seconds=idle,
+            poll_seconds=min(2.0, max(0.05, idle / 4)),
+        )
 
     def _signatures(self) -> Sequence[StderrSignature]:
         return _CLAUDE_SIGNATURES

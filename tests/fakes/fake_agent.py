@@ -212,6 +212,75 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
         )
         return 1
 
+    if scenario == "background_stopped":
+        # The `enrich-07b` thinkers/stories shape: the agent fans out into backgrounded subagents,
+        # ends its turn "waiting for the results", and the CLI stops every one of them at exit.
+        started = [
+            {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": f"bg-{n}",
+                "description": f"Research group {n}",
+                "subagent_type": "general-purpose",
+                "is_backgrounded": True,
+                "task_type": "local_agent",
+            }
+            for n in (1, 2)
+        ]
+        stopped = [
+            {
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": f"bg-{n}",
+                "status": "stopped",
+            }
+            for n in (1, 2)
+        ]
+        _emit(
+            [
+                {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
+                *started,
+                *stopped,
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "Two searches are running in parallel. I will wait for them.",
+                    "session_id": _SESSION_ID,
+                    "usage": {"input_tokens": 10, "output_tokens": 30},
+                    "modelUsage": {
+                        "main": {"inputTokens": 10, "outputTokens": 900, "costUSD": 3.0},
+                        "small": {"inputTokens": 5000, "outputTokens": 100, "costUSD": 1.5},
+                    },
+                    "total_cost_usd": 4.5,
+                    "subagent_stats": {"started_in_background": 2, "killed": {"system": 2}},
+                },
+            ]
+        )
+        return 0
+
+    if scenario == "result_then_idle":
+        # `sources_gate` run 99: the final result is written, nothing is left running, and the
+        # process neither writes nor exits. Bounded so a broken watch fails the test, not the run.
+        _emit(
+            [
+                {"type": "system", "subtype": "init", "session_id": _SESSION_ID},
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": _FINAL_MESSAGE,
+                    "session_id": _SESSION_ID,
+                    "usage": {"input_tokens": 12, "output_tokens": 7},
+                    "structured_output": _schema_output("claude", cli_args),
+                    "total_cost_usd": 0.001,
+                },
+            ]
+        )
+        sys.stdout.flush()
+        time.sleep(30)
+        return 0
+
     if scenario == "error_max_turns":
         # A clean run that exhausted its turn cap: a terminal result event with the CLI's own
         # ``error_max_turns`` subtype + a session id (so the max-turns gate can resume it). The real

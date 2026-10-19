@@ -72,6 +72,26 @@ def summarize_spend(attempts: Sequence[ProviderAttemptRow]) -> dict[str, Any] | 
     }
 
 
+def summarize_task_spend(attempts: Sequence[ProviderAttemptRow]) -> dict[str, Any] | None:
+    """What the whole task spent — every node attempt and the supervisor layer — in total and per
+    provider. ``None`` when the task made no provider call at all.
+
+    The cost is what the providers reported, summed; for Claude that figure covers the subagents an
+    attempt ran, and so do its token counts (they are read from the same per-model tally). An
+    attempt that reported no cost is left out of the sum rather than counted as free — the caller
+    states those beside the total (:mod:`~wastech_orchestrator.core.cost_gap`).
+    """
+    if not attempts:
+        return None
+    by_provider: dict[str, list[ProviderAttemptRow]] = {}
+    for row in attempts:
+        by_provider.setdefault(row.provider, []).append(row)
+    return {
+        "total": _bucket(attempts),
+        "by_provider": {name: _bucket(by_provider[name]) for name in sorted(by_provider)},
+    }
+
+
 def _bucket(rows: Sequence[ProviderAttemptRow]) -> dict[str, Any]:
     """One group's call count, token totals, cost and provider wall time.
 

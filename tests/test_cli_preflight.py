@@ -176,7 +176,7 @@ def _patch_providers(
             auth=auth.get("codex", _LOGGED_IN),
         ),
     }
-    monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
+    monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout, deny_policy=None: providers)
     monkeypatch.setattr(cli, "preflight_gh", lambda _security=None: gh_result)
     return providers
 
@@ -192,6 +192,27 @@ def test_preflight_ready(
     assert "codex: OK" in out
     assert "isolation: OK" in out
     assert "preflight: ready" in out
+
+
+def test_preflight_probes_with_the_deny_policy_a_run_will_use(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The isolation smoke proves the profile an attempt will launch only if it is built with the
+    # same deny entries — the resolved env-file above all, which a relative `--config` used to
+    # turn into a relative path that Codex refused on every attempt while preflight said OK.
+    providers = _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    seen: dict[str, object] = {}
+
+    def _capture(_config: object, *, layout: object, deny_policy: object = None) -> object:
+        seen["deny_policy"] = deny_policy
+        return providers
+
+    monkeypatch.setattr(cli, "build_providers", _capture)
+    cli.cmd_preflight(_args())
+    capsys.readouterr()
+    policy = seen["deny_policy"]
+    assert policy is not None
+    assert all(path.is_absolute() for path in policy.denied_paths)  # type: ignore[attr-defined]
 
 
 def test_preflight_not_ready_when_a_binary_is_missing(

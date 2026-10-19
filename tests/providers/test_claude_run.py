@@ -84,6 +84,7 @@ class FakeRun:
         stdin_text: str | None = None,
         monotonic: Any = None,
         recorder: Any = None,
+        make_containment: Any = None,
     ) -> ProcessResult:
         self.calls += 1
         self.captured = {"argv": list(argv), "stdin_text": stdin_text, "env": dict(env)}
@@ -642,6 +643,7 @@ class _ProbingClaudeRun:
         stdin_text: str | None = None,
         monotonic: Any = None,
         recorder: Any = None,
+        make_containment: Any = None,
     ) -> ProcessResult:
         self.argvs.append(list(argv))
         if "--version" in argv:

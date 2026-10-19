@@ -342,7 +342,7 @@ def test_engine_single_fix_iterations_increment() -> None:
 
 def test_engine_budget_exhaustion_goes_manual() -> None:
     # The named-loop case. The global-cap and inline-budget cases are the two tests
-    # below. test_fix budget 2 => second consecutive fail is stuck (>= semantics).
+    # below. test_fix budget 2 => two fix rounds; the third consecutive fail is stuck.
     snap = _snapshot(
         [_agent("s"), _checks("t"), _publish("done"), _agent("fix")],
         [

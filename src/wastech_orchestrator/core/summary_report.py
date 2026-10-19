@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.core.cost_gap import CostGap, gap_json
-from wastech_orchestrator.core.flow.recorder import StepFacts
+from wastech_orchestrator.core.cost_gap import CostGap, cost_gaps, gap_json, render_cost_gap
+from wastech_orchestrator.core.flow.recorder import StepFacts, fell_back_from
 from wastech_orchestrator.core.follow_ups import (
     FollowUp,
     follow_up_json,
@@ -36,14 +37,20 @@ from wastech_orchestrator.core.supervisor_packet import (
     split_check_runs,
     summarize_diff,
 )
+from wastech_orchestrator.core.supervisor_usage import summarize_task_spend
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.state_store import CheckRunRow
+from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow, ProviderAttemptRow
 
 SUMMARY_MD_FILENAME = "summary.md"
 SUMMARY_JSON_FILENAME = "summary.json"
 #: The skipped-nodes heading. Also the idempotency key when the section is appended to a body the
 #: oversight layer wrote, so it is stated once and both callers use the same renderer.
 SKIPPED_NODES_HEADING = "## Pipeline nodes skipped"
+#: Nodes that ran on a provider other than the one they were routed to. Its own heading for the
+#: same reason as the one above: it is appended to a provider-authored body too, idempotently.
+PROVIDER_FALLBACKS_HEADING = "## Provider fallbacks"
+#: What the task's provider calls cost, summed from the recorded attempts.
+RUN_COST_HEADING = "## Run cost"
 
 _DEGRADED_CALLOUT = (
     "> ⚠️ **Fallback summary — not a provider-authored synthesis.** The whole-task summary could "
@@ -60,6 +67,7 @@ def render_summary_report(
     skipped_nodes: Iterable[str],
     task_ref: str | None,
     degraded: bool,
+    extra_sections: Sequence[str] = (),
 ) -> str:
     """Render the run's durable facts as the pull-request body.
 
@@ -95,6 +103,7 @@ def render_summary_report(
     skipped = tuple(skipped_nodes)
     if skipped:
         blocks.append(render_skipped_nodes_section(skipped))
+    blocks.extend(extra_sections)
     return "\n".join(blocks)
 
 
@@ -109,6 +118,92 @@ def render_skipped_nodes_section(skipped_nodes: Iterable[str]) -> str:
     return f"{SKIPPED_NODES_HEADING}\n\n{lines}\n"
 
 
+@dataclass(frozen=True)
+class RunFacts:
+    """Whole-run facts both summary bodies carry, whoever wrote the prose.
+
+    ``task_usage`` is the whole task's spend for ``summary.json``
+    (:func:`~wastech_orchestrator.core.supervisor_usage.summarize_task_spend`); ``sections`` are
+    the rendered fact blocks appended to the body (:func:`render_provider_fallbacks_section`,
+    :func:`render_run_cost_section`).
+    """
+
+    task_usage: Mapping[str, Any] | None = None
+    sections: tuple[str, ...] = ()
+
+
+def render_provider_fallbacks_section(
+    node_runs: Sequence[NodeRunRow], attempts: Sequence[ProviderAttemptRow]
+) -> str | None:
+    """The ``## Provider fallbacks`` block, or ``None`` when every node ran where it was routed.
+
+    One line per node: the provider it was routed to, the one it ran on, in how many of its passes,
+    and why the first one failed. A provider the flow pinned is said so, because then the fallback
+    undid a deliberate choice — a critic pinned to a second model that was judged by the first one
+    in every pass (``enrich-07b``) reads as a passed gate unless the body says otherwise.
+    """
+    by_node: dict[str, list[NodeRunRow]] = {}
+    for row in node_runs:
+        if not row.skipped and row.provider_used:
+            by_node.setdefault(row.node_id, []).append(row)
+    lines = []
+    for node_id, rows in by_node.items():
+        fell = [row for row in rows if fell_back_from(row) is not None]
+        if not fell:
+            continue
+        primary = fell[0].route_primary or "?"
+        used = sorted({row.provider_used or "?" for row in fell})
+        run_ids = {row.id for row in fell}
+        failures = sorted(
+            {
+                attempt.error_class
+                for attempt in attempts
+                if attempt.node_run_id in run_ids
+                and attempt.provider == primary
+                and attempt.error_class
+            }
+        )
+        why = (
+            f" — `{primary}` failed with {', '.join(f'`{c}`' for c in failures)}"
+            if failures
+            else ""
+        )
+        pinned = " (pinned by the flow)" if fell[0].route_source == "flow_node" else ""
+        lines.append(
+            f"- `{node_id}`: routed to `{primary}`{pinned}, ran on "
+            f"{', '.join(f'`{u}`' for u in used)} in {len(fell)} of {len(rows)} "
+            f"{'pass' if len(rows) == 1 else 'passes'}{why}."
+        )
+    if not lines:
+        return None
+    return "\n".join([PROVIDER_FALLBACKS_HEADING, "", *lines]) + "\n"
+
+
+def render_run_cost_section(attempts: Sequence[ProviderAttemptRow]) -> str | None:
+    """The ``## Run cost`` block, or ``None`` when the task made no provider call.
+
+    The total is what the providers reported, summed; whatever was not priced is named beside it
+    (:func:`~wastech_orchestrator.core.cost_gap.render_cost_gap`) so the figure is never read as
+    the whole bill when it is not.
+    """
+    spend = summarize_task_spend(attempts)
+    if spend is None:
+        return None
+    total = spend["total"]
+    cost = total.get("cost")
+    calls = total["calls"]
+    figure = f"${cost:,.2f}" if isinstance(cost, (int, float)) else "no recorded cost"
+    line = (
+        f"Recorded provider cost: {figure} over {calls} provider "
+        f"{'call' if calls == 1 else 'calls'} (Claude figures include its subagents)."
+    )
+    gap = render_cost_gap(cost_gaps(attempts))
+    lines = [RUN_COST_HEADING, "", line]
+    if gap:
+        lines.append(f"Not in that figure: {gap}.")
+    return "\n".join(lines) + "\n"
+
+
 def write_summary_report(
     artifacts_root: str | Path,
     facts: PacketFacts,
@@ -120,6 +215,7 @@ def write_summary_report(
     degraded: bool,
     supervisor_usage: Mapping[str, Any] | None,
     cost_gaps: Sequence[CostGap] = (),
+    run_facts: RunFacts | None = None,
 ) -> tuple[str, str]:
     """Write the deterministic ``summary.md`` + ``summary.json`` pair; return both paths.
 
@@ -132,7 +228,11 @@ def write_summary_report(
     ``cost_gaps`` travels with the spend for that reason: the cost above it is summed from a column
     one provider never fills, so the file states what the figure excludes instead of presenting a
     partial total as the whole bill. Empty on a run whose every attempt was priced.
+
+    ``run_facts`` carries the whole task's spend for ``summary.json`` and the already-rendered fact
+    blocks (provider fallbacks, run cost) appended to the body.
     """
+    facts_extra = run_facts or RunFacts()
     task_dir = task_artifact_dir(artifacts_root, facts.task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
     _write_summary_json(
@@ -142,6 +242,7 @@ def write_summary_report(
         supervisor_usage=supervisor_usage,
         cost_gaps=cost_gaps,
         degraded=degraded,
+        task_usage=facts_extra.task_usage,
     )
     body = render_summary_report(
         facts,
@@ -150,6 +251,7 @@ def write_summary_report(
         skipped_nodes=skipped_nodes,
         task_ref=task_ref,
         degraded=degraded,
+        extra_sections=facts_extra.sections,
     )
     md_path = task_dir / SUMMARY_MD_FILENAME
     md_path.write_text(body, encoding="utf-8", newline="")
@@ -164,6 +266,7 @@ def _write_summary_json(
     supervisor_usage: Mapping[str, Any] | None,
     cost_gaps: Sequence[CostGap],
     degraded: bool,
+    task_usage: Mapping[str, Any] | None = None,
 ) -> None:
     """Write the deterministic ``summary.json``, one key set with the layer's own writer.
 
@@ -178,6 +281,8 @@ def _write_summary_json(
     terminal.
     """
     payload: dict[str, Any] = {"what": what, "summary": ""}
+    if task_usage is not None:
+        payload["task_usage"] = dict(task_usage)
     if supervisor_usage is not None:
         payload["supervisor_usage"] = dict(supervisor_usage)
     if cost_gaps:
