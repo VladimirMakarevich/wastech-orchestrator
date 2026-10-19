@@ -24,6 +24,7 @@ from wastech_orchestrator.runtime_layout import (
     RUNS_DIRNAME,
     InternalDenyPolicy,
     RuntimeLayout,
+    anchored,
     runs_root,
 )
 
@@ -153,3 +154,20 @@ def test_deny_policy_env_file_optional(tmp_path: Path) -> None:
     )
     assert all(isinstance(p, Path) for p in policy.denied_paths)
     assert layout.private_home in policy.denied_paths
+
+
+def test_anchored_roots_a_relative_path_against_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A sandbox rule may not be relative: Codex refuses the key outright.
+    monkeypatch.chdir(tmp_path)
+    assert anchored(Path(".worc/.env")) == tmp_path / ".worc" / ".env"
+
+
+def test_anchored_leaves_a_rooted_path_exactly_as_named() -> None:
+    # On Windows `Path.absolute()` moves a rooted, drive-less path onto the current drive
+    # (`\etc\x` -> `C:\etc\x`); a path that already has a root is the operator's and stays as is.
+    rooted_without_drive = PureWindowsPath("\\etc\\secrets\\prod.env")
+    assert anchored(rooted_without_drive) is rooted_without_drive  # type: ignore[arg-type]
+    absolute = Path("/etc/secrets/prod.env").absolute()
+    assert anchored(absolute) == absolute

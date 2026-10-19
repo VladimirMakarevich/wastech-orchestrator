@@ -97,6 +97,7 @@ from wastech_orchestrator.runtime_layout import (
     EXCHANGE_HOME_DIRNAME,
     TRACKED_LIFECYCLE_STATES,
     RuntimeLayout,
+    anchored,
     runs_root,
 )
 from wastech_orchestrator.security.env import (
@@ -1070,12 +1071,12 @@ def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
     """
     explicit = getattr(args, "env_file", None)
     if explicit is not None:
-        return Path(explicit).absolute(), True
+        return anchored(Path(explicit)), True
     config_path = resolve_config_path(args)
     if config_path is not None:
         # Absolute even when ``--config`` was relative: this path becomes a sandbox deny entry, and
         # a relative one there is rejected by Codex rather than resolved.
-        return (Path(config_path).parent / ".env").absolute(), False
+        return anchored(Path(config_path).parent / ".env"), False
     info = detect.git_info(Path.cwd())
     if info is not None:
         return RuntimeLayout.default(info.root).private_home / ".env", False

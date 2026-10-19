@@ -91,6 +91,18 @@ EXCHANGE_SEAL_DIRNAME = "exchange-seals"
 EXCHANGE_QUARANTINE_DIRNAME = "exchange-quarantine"
 
 
+def anchored(path: Path) -> Path:
+    """*path* with a root: a relative one is resolved against this process's working directory.
+
+    For every path that becomes a sandbox rule — Codex refuses a relative filesystem key outright
+    ("must be absolute"), so a relative ``--config``, ``--env-file`` or ``repo.local_path`` would
+    otherwise fail every attempt. A path that already has a root is returned exactly as it is, never
+    re-rooted: on Windows ``Path.absolute()`` would move a rooted, drive-less path such as
+    ``\\etc\\x`` onto the current drive, which is not the path the operator named.
+    """
+    return path if path.anchor else path.absolute()
+
+
 def runs_root(private_home: str | Path) -> Path:
     """The parent of every per-task runtime root: ``<private_home>/runs/``.
 
