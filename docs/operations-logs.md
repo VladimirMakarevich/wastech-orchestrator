@@ -10,10 +10,12 @@ The pipeline emits a secret-free **logfmt** trace on stderr (keyed by `task_id` 
 ts=… level=info task_id=task-001 stage=implementation primary=codex msg="stage started"
 ts=… level=info task_id=task-001 stage=implementation provider=codex attempt=1 elapsed_seconds=30.0 msg="provider heartbeat"
 ts=… level=info task_id=task-001 stage=implementation primary=codex duration_seconds=84.2 msg="stage completed"
-ts=… level=info task_id=task-001 stage=review msg="falling back" from=codex to=claude error_class=rate_limited
+ts=… level=info task_id=task-001 stage=review msg="falling back" from=codex to=claude error_class=rate_limited route_source=config
 ts=… level=warn task_id=task-001 msg="task stuck" limit=max_total_fix_iterations fix_iterations=30
 ts=… level=info task_id=task-001 msg=terminal final_status=done pr_url=… cleanup_safe=True
 ```
+
+`falling back` is logged at `INFO` when the node's provider came from the config (`route_source=config`) and at `WARNING` when the flow pinned it (`route_source=flow_node`), because then the fallback undoes a deliberate choice; either way the node's completion adds a `WARNING` that it ran on a fallback provider (see [provider outage behavior](operations-running.md#provider-outage-behavior)). A Claude CLI that writes its final result and then sits silent without exiting is stopped after 120 s and its result used, with a `WARNING` saying so (`the provider wrote its final result and then sat idle for 120s without exiting; worc stopped it and is using that result`) — a healthy run exits within a second of its result, so this turns a stuck tail from "until the node timeout" into two minutes. It is not armed while a backgrounded task of the agent's is still out.
 
 For a durable live trace, enable the rotating file handler and heartbeat:
 
@@ -123,6 +125,6 @@ python -m wastech_orchestrator --config ./config.yaml status
 python -m wastech_orchestrator --config ./config.yaml status task-001
 ```
 
-`status` opens the configured artifact root's `state.db` read-only. Without an id it reports active tasks, or the latest task when none is active. It does not invoke providers, checks, or Git. The displayed provider is the route's configured primary; it does not claim that a currently running subprocess has already succeeded.
+`status` opens the configured artifact root's `state.db` read-only. Without an id it reports active tasks, or the latest task when none is active. Each task block ends with what it has cost so far when any attempt reported a price — `cost=$114.11 over 19 provider calls (Claude's reported cost includes its subagents)`, every node attempt plus the supervisor layer, in the same words as the PR body's `## Run cost` section — and, beside it, `cost_not_accounted=` naming the attempts no price was reported for (Codex), so the figure is not read as the whole bill. It does not invoke providers, checks, or Git. The displayed provider is the route's configured primary; it does not claim that a currently running subprocess has already succeeded.
 
 ---
