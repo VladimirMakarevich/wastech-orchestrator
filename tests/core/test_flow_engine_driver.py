@@ -19,7 +19,7 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.validator import validate_flow
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import PushOutcome
+from wastech_orchestrator.git_manager import CurrentDiff, PushOutcome
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
@@ -160,8 +160,12 @@ class _FakeGit:
     ) -> str | None:
         return "https://example/pr/1"
 
-    def write_current_diff(self, task_id: str) -> str:
-        return "/art/current.diff"
+    def write_current_diff(self, task_id: str) -> CurrentDiff:
+        return CurrentDiff(
+            diff_path="/art/current.diff",
+            overview_path="/art/change-overview.txt",
+            base_sha="0" * 40,
+        )
 
     def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         return ()

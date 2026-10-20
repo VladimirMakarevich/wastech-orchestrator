@@ -31,6 +31,16 @@ MAX_LISTED_PATHS = 200
 #: closing "not listed" line keeps the totals exact either way.
 MAX_SECTION_BYTES = 16 * 1024
 
+#: The overview's file name, beside ``current.diff`` in the task's private artifacts and in the
+#: exchange the agent reads.
+CHANGE_OVERVIEW_FILENAME = "change-overview.txt"
+
+#: The title of the section the full diff holds: the whole task, measured from its base.
+TASK_BASE_TITLE = "Change since the task base"
+#: The title of the section measured from the orchestrator's own last commit for the task — in a
+#: decomposed run, the change of the subtask in progress.
+LAST_COMMIT_TITLE = "Change since the orchestrator's last commit"
+
 _GIT_HEADER = "diff --git "
 _DEV_NULL = "/dev/null"
 
@@ -132,6 +142,20 @@ def render_overview(sections: Sequence[OverviewSection], *, diff_size: int) -> s
         _render_section(section, diff_size=diff_size if index == 0 else None)
         for index, section in enumerate(sections)
     )
+
+
+def overview_base(overview_text: str) -> str | None:
+    """The base SHA an overview's task-base section names, or ``None`` if it names none.
+
+    Lets a resumed task hand a node the same base a fresh run did, read back from the overview the
+    run wrote rather than resolved again from a repository that may have moved since.
+    """
+    first_line = overview_text.split("\n", 1)[0]
+    prefix = f"{TASK_BASE_TITLE} "
+    if not first_line.startswith(prefix):
+        return None
+    sha = first_line[len(prefix) :].split(" ", 1)[0]
+    return sha or None
 
 
 @dataclass

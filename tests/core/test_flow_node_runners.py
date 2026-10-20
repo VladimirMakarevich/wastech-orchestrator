@@ -49,7 +49,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.follow_ups import evaluator_finding_follow_ups
-from wastech_orchestrator.git_manager import PushOutcome
+from wastech_orchestrator.git_manager import CurrentDiff, PushOutcome
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -3380,9 +3380,13 @@ class FakeGit:
         self.pr_references_block = references_block
         return "https://example/pr/1"
 
-    def write_current_diff(self, task_id: str) -> str:
+    def write_current_diff(self, task_id: str) -> CurrentDiff:
         self.calls.append(("write_current_diff", task_id))
-        return "/art/current.diff"
+        return CurrentDiff(
+            diff_path="/art/current.diff",
+            overview_path="/art/change-overview.txt",
+            base_sha="0" * 40,
+        )
 
     def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         if self._changed_seq:

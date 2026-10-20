@@ -27,6 +27,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.git_manager import (
     ChangedPath,
+    CurrentDiff,
     GitControlDrift,
     GitControlState,
     PushOutcome,
@@ -379,7 +380,9 @@ class GitPort(Protocol):
         references_block: str | None = None,
     ) -> str | None: ...
 
-    def write_current_diff(self, task_id: str) -> str: ...
+    #: The task's full diff and its bounded overview, written together from one snapshot, plus the
+    #: full SHA both are measured from.
+    def write_current_diff(self, task_id: str) -> CurrentDiff: ...
 
     #: The task's change — committed or not — measured from the gate's reference point, not from
     #: ``HEAD``: a commit made inside the task must not be able to empty the dangerous-diff gate.

@@ -39,6 +39,15 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
     SecurityConfig,
 )
+from wastech_orchestrator.diff_overview import (
+    CHANGE_OVERVIEW_FILENAME,
+    LAST_COMMIT_TITLE,
+    TASK_BASE_TITLE,
+    OverviewSection,
+    parse_diff,
+    render_overview,
+)
+from wastech_orchestrator.globmatch import path_matches_any
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
@@ -127,6 +136,24 @@ def _runtime_exclude_pathspecs(roots: Sequence[str]) -> tuple[str, ...]:
     filter already use.
     """
     return tuple(f":(exclude,top){r}/" for r in roots)
+
+
+def _overview_section(
+    title: str, base_sha: str, diff_text: str, denied_patterns: Sequence[str]
+) -> OverviewSection:
+    """One overview section for *diff_text*, marking every path a denied-read glob covers.
+
+    A rename is marked when either side is denied: the overview must not point a node at a file it
+    may not read under its old name any more than under its new one.
+    """
+    entries = parse_diff(diff_text)
+    denied = frozenset(
+        path
+        for entry in entries
+        for path in (entry.path, entry.previous_path)
+        if path is not None and path_matches_any(path, denied_patterns)
+    )
+    return OverviewSection(title=title, base_sha=base_sha, entries=entries, denied=denied)
 
 
 _RUNTIME_IGNORE_COMMENT = (
@@ -678,6 +705,20 @@ class ChangedPath:
     status: str
     path: str
     previous_path: str | None = None
+
+
+@dataclass(frozen=True)
+class CurrentDiff:
+    """What :meth:`GitManager.write_current_diff` wrote, all of it from one working-tree snapshot.
+
+    ``diff_path`` is the task's full redacted diff and ``overview_path`` its bounded overview, both
+    private artifacts; ``base_sha`` is the full commit SHA they are measured from, so a node told
+    to inspect the change itself covers exactly the scope the core reports.
+    """
+
+    diff_path: str
+    overview_path: str
+    base_sha: str
 
 
 class ConflictEvidence(StrEnum):
@@ -3594,8 +3635,8 @@ class GitManager:
 
     # --- diffs ----------------------------------------------------------------------------
 
-    def write_current_diff(self, task_id: str) -> str:
-        """Write ``logs/<task-id>/current.diff`` (this task's change vs its base) and return it.
+    def write_current_diff(self, task_id: str) -> CurrentDiff:
+        """Write ``logs/<task-id>/current.diff`` (this task's change vs its base) and its overview.
 
         Diffs :meth:`_diff_base` against the **working tree** (``git diff <base>``, not ``git diff
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
@@ -3641,27 +3682,59 @@ class GitManager:
 
         The diff is redacted before writing: the failure report reads it back, so this is
         the single place that keeps a leaked secret out of both ``current.diff`` and the report.
+
+        ``change-overview.txt`` is written beside it in the same call — the bounded map a node reads
+        before deciding what to open — and both are taken inside one intent-to-add bracket, so they
+        describe one moment of the tree. Its first section is parsed from the very diff text written
+        here, never from a second query, so it lists exactly the paths ``current.diff`` holds. When
+        the orchestrator has committed inside the task (:meth:`gate_reference` resolves to a
+        different commit than the base), a second section lists what changed since that commit — the
+        subtask in progress, in a decomposed run — with the same pathspec. A changed path matching
+        ``security.denied_read_paths`` is listed by name and counts only, marked ``[denied]``; the
+        overview never carries hunk content, and it is redacted with the same secrets as the diff.
+
+        Both references are resolved to full SHAs before the index is touched, and a reference that
+        does not resolve raises :class:`GitCommandError` — handing a node a change measured from
+        nowhere would be worse than stopping. Nothing is written until both texts exist, so a
+        failure leaves the previous pair in place rather than a fresh diff beside a stale overview.
         """
+        base_sha = self._resolve_commit(self._diff_base())
+        gate_sha = self._resolve_commit(self.gate_reference(task_id))
+        pathspec = ("--", ":/", *_runtime_exclude_pathspecs(RUNTIME_EXCLUDED_DIRS))
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
         untracked_paths = [p for p in untracked.split("\0") if p]
         if untracked_paths:
             self._git("add", "--intent-to-add", "--", *untracked_paths)
         try:
-            diff = self._git(
-                "diff",
-                "--text",
-                self._diff_base(),
-                "--",
-                ":/",
-                *_runtime_exclude_pathspecs(RUNTIME_EXCLUDED_DIRS),
-            ).stdout
+            diff = self._git("diff", "--text", base_sha, *pathspec).stdout
+            since_gate = (
+                None
+                if gate_sha == base_sha
+                else self._git("diff", "--text", gate_sha, *pathspec).stdout
+            )
         finally:
             if untracked_paths:
                 self._git("reset", "--", *untracked_paths)
+        secrets = self._diff_secrets()
+        redacted = redact_text(diff, extra_secrets=secrets)
+        denied_patterns = self._config.security.denied_read_paths
+        sections = [_overview_section(TASK_BASE_TITLE, base_sha, redacted, denied_patterns)]
+        if since_gate is not None:
+            since_redacted = redact_text(since_gate, extra_secrets=secrets)
+            sections.append(
+                _overview_section(LAST_COMMIT_TITLE, gate_sha, since_redacted, denied_patterns)
+            )
+        overview = redact_text(
+            render_overview(sections, diff_size=len(redacted.encode("utf-8"))),
+            extra_secrets=secrets,
+        )
         task_dir = task_artifact_dir(self._artifacts_root, task_id)
         task_dir.mkdir(parents=True, exist_ok=True)
         path = task_dir / "current.diff"
-        path.write_text(redact_text(diff, extra_secrets=self._diff_secrets()), encoding="utf-8")
+        path.write_text(redacted, encoding="utf-8")
+        # Bytes, not text mode: the overview is the same file on every platform.
+        overview_path = task_dir / CHANGE_OVERVIEW_FILENAME
+        overview_path.write_bytes(overview.encode("utf-8"))
         offenders = self.control_byte_paths()
         if offenders:
             bind(_LOG, task_id=task_id, component="diff").warning(
@@ -3670,7 +3743,11 @@ class GitManager:
                 len(offenders),
                 ", ".join(offenders),
             )
-        return str(path)
+        return CurrentDiff(diff_path=str(path), overview_path=str(overview_path), base_sha=base_sha)
+
+    def _resolve_commit(self, ref: str) -> str:
+        """The full SHA of the commit *ref* names; :class:`GitCommandError` when it names none."""
+        return self._git_checked("rev-parse", "--verify", f"{ref}^{{commit}}")
 
     def control_byte_paths(self) -> list[str]:
         """Repo-relative POSIX paths of this task's changed files that contain a NUL byte.

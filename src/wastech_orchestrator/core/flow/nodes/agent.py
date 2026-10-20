@@ -662,7 +662,8 @@ class AgentNodeRunner:
         """
         if not self._is_workspace_write(node, ctx) or self._s.git is None:
             return None
-        private_diff = self._s.git.write_current_diff(ctx.task_id)
+        written = self._s.git.write_current_diff(ctx.task_id)
+        private_diff = written.diff_path
         # Keep the private authoritative diff as the audit artifact; expose only the redacted
         # exchange copy as {diff_path} to the provider.
         self._in.diff_path = publish_file(
@@ -674,6 +675,7 @@ class AgentNodeRunner:
         )
         if self._s.register_artifact is not None:
             self._s.register_artifact(ctx.task_id, "diff", private_diff)
+            self._s.register_artifact(ctx.task_id, "change_overview", written.overview_path)
         self._apply_output_containment_guard(node, ctx)
         entries = self._s.git.changed_code_entries(ctx.task_id)
         dangerous = evaluate_diff_gate(entries, self._s.trust_level, self._s.protected_paths)
@@ -772,12 +774,12 @@ class AgentNodeRunner:
             node, ctx, route, human_input_path=self._exchange_human_input(node, ctx, path)
         )
         assert self._s.git is not None
-        private_diff = self._s.git.write_current_diff(ctx.task_id)
+        written = self._s.git.write_current_diff(ctx.task_id)
         self._in.diff_path = publish_file(
             self._s.exchange_root,
             ctx.task_id,
             "current.diff",
-            private_diff,
+            written.diff_path,
             extra_secrets=self._s.prompt_secrets,
         )
         # Re-evaluate under the same policy the request used, so the reconsider pass agrees on which
