@@ -489,6 +489,11 @@ class NodeInputs:
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
+    #: the exchange copy of the change overview written with ``diff_path``, and the full SHA the
+    #: change is measured from. Both ``None`` until the first workspace-write edit, like the diff,
+    #: and both replaced every time the diff is.
+    change_overview_path: str | None = None
+    diff_base: str | None = None
     checks_path: str | None = None
     review_path: str | None = None
     subtask_count: int | None = None

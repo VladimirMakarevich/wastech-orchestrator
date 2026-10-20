@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -49,12 +50,14 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.follow_ups import evaluator_finding_follow_ups
+from wastech_orchestrator.diff_overview import LAST_COMMIT_TITLE
 from wastech_orchestrator.git_manager import CurrentDiff, PushOutcome
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
     RunStatus,
+    build_effective_prompt,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
@@ -1177,6 +1180,211 @@ def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path == "/art/current.diff"
     assert ("write_current_diff", "task-1") in git.calls
+
+
+def _readonly_agent(node_id: str = "docs") -> AgentNode:
+    return AgentNode(
+        id=node_id, kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+
+
+def test_every_node_after_an_edit_is_handed_the_overview_base_and_guidance(
+    tmp_path: Path,
+) -> None:
+    # After a workspace-write edit, the next agent and the next evaluator both carry the overview,
+    # the base and one where-to-start sentence, and the footer lists them in that order.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router, git = FakeRouter(_result({"findings": []})), FakeGit()
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(services, inputs).run(_ws_node(), _ctx(_ws_node()))
+    assert (inputs.change_overview_path, inputs.diff_base) == ("/art/change-overview.txt", "0" * 40)
+
+    review = _evaluator("review")
+    EvaluatorNodeRunner(services, inputs).run(review, _ctx(review))
+    AgentNodeRunner(services, inputs).run(_readonly_agent(), _ctx(_readonly_agent()))
+    for request in router.requests[1:]:
+        assert request.change_overview_path == "/art/change-overview.txt"
+        assert request.diff_base == "0" * 40
+        assert request.change_guidance is not None
+        footer = build_effective_prompt(request)
+        assert footer.index("- change overview:") < footer.index("- diff:")
+        assert footer.index("- diff:") < footer.index(f"Change base: {'0' * 40}")
+        assert footer.endswith(request.change_guidance)
+
+
+def test_before_the_first_edit_nothing_about_the_change_is_handed(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = FakeRouter(_result())
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    AgentNodeRunner(services, _inputs(tmp_path, task_path="/x/task.md")).run(
+        _readonly_agent("planning"), _ctx(_readonly_agent("planning"))
+    )
+    request = router.requests[0]
+    assert (request.change_overview_path, request.diff_base, request.change_guidance) == (
+        None,
+        None,
+        None,
+    )
+    assert build_effective_prompt(request) == (
+        "go\n\nContext files (read them as needed; do not assume their contents):\n"
+        "- task: /x/task.md"
+    )
+
+
+@pytest.mark.parametrize(
+    ("always_has_shell", "opening"),
+    [(True, "Start from the change overview"), (False, "Read the full diff")],
+)
+def test_the_guidance_follows_whether_every_provider_on_the_route_has_a_shell(
+    tmp_path: Path, always_has_shell: bool, opening: str
+) -> None:
+    # The router answers for the most restrictive end of the route; the core only picks the
+    # sentence. A detection answer of "yes" must not leak into it.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+
+    class _Router(FakeRouter):
+        def route_grants_shell(self, route: ResolvedRoute, **_kwargs: Any) -> bool:
+            return True
+
+        def route_always_grants_shell(self, route: ResolvedRoute, **_kwargs: Any) -> bool:
+            return always_has_shell
+
+    router = _Router(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _inputs(
+        tmp_path,
+        diff_path="/x/current.diff",
+        change_overview_path="/x/change-overview.txt",
+        diff_base="a" * 40,
+    )
+    review = _evaluator("review")
+    EvaluatorNodeRunner(services, inputs).run(review, _ctx(review))
+    AgentNodeRunner(services, inputs).run(_readonly_agent(), _ctx(_readonly_agent()))
+    assert len(router.requests) == 2
+    assert all(r.change_guidance.startswith(opening) for r in router.requests)
+
+
+def test_a_subtask_is_told_which_section_is_its_own(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _inputs(
+        tmp_path,
+        diff_path="/x/current.diff",
+        change_overview_path="/x/change-overview.txt",
+        diff_base="a" * 40,
+    )
+    review = _evaluator("review")
+    EvaluatorNodeRunner(services, inputs).run(review, replace(_ctx(review), subtask_order=2))
+    EvaluatorNodeRunner(services, inputs).run(review, _ctx(review))
+    in_subtask, whole_task = (r.change_guidance for r in router.requests)
+    assert LAST_COMMIT_TITLE in in_subtask and LAST_COMMIT_TITLE not in whole_task
+
+
+def test_the_change_overview_is_published_to_the_exchange(tmp_path: Path) -> None:
+    # The node is pointed at the redacted exchange copy, never at the private artifact.
+    from wastech_orchestrator.providers.artifacts import exchange_task_dir
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    private = tmp_path / "art"
+    private.mkdir()
+
+    class _WritingGit(FakeGit):
+        def write_current_diff(self, task_id: str) -> CurrentDiff:
+            (private / "current.diff").write_text("diff\n", encoding="utf-8")
+            (private / "change-overview.txt").write_bytes(b"Change since the task base x\n")
+            return CurrentDiff(
+                diff_path=str(private / "current.diff"),
+                overview_path=str(private / "change-overview.txt"),
+                base_sha="b" * 40,
+            )
+
+    exchange_root = tmp_path / ".worc-io"
+    services = replace(
+        _services(
+            FakeRouter(_result()),
+            FakeStore(),
+            FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+            git=_WritingGit(),
+        ),
+        exchange_root=str(exchange_root),
+    )
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(services, inputs).run(_ws_node(), _ctx(_ws_node()))
+    published = exchange_task_dir(str(exchange_root), "task-1") / "change-overview.txt"
+    assert inputs.change_overview_path == str(published)
+    assert published.read_bytes() == b"Change since the task base x\n"
+
+
+def test_a_reconsider_pass_republishes_the_diff_and_its_overview(tmp_path: Path) -> None:
+    # A denied dangerous diff re-runs the node; what it is handed afterwards describes the
+    # reconsidered tree, both files rewritten together.
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+
+    class _CountingGit(FakeGit):
+        def write_current_diff(self, task_id: str) -> CurrentDiff:
+            self.calls.append(("write_current_diff", task_id))
+            n = sum(1 for call in self.calls if call[0] == "write_current_diff")
+            return CurrentDiff(
+                diff_path=f"/art/current-{n}.diff",
+                overview_path=f"/art/change-overview-{n}.txt",
+                base_sha=str(n) * 40,
+            )
+
+    git = _CountingGit(changed_seq=[(ChangedPath(status="D", path="src/x.py"),), ()])
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(_guard_services(tmp_path, git, notifier), inputs).run(
+        _ws_node(), _ctx(_ws_node())
+    )
+    assert (inputs.diff_path, inputs.change_overview_path, inputs.diff_base) == (
+        "/art/current-2.diff",
+        "/art/change-overview-2.txt",
+        "2" * 40,
+    )
+
+
+def test_a_flow_author_can_reference_the_overview_and_its_base(tmp_path: Path) -> None:
+    (tmp_path / "r.md").write_text(
+        "go{?change_overview_path} — overview {change_overview_path} from {diff_base}"
+        "{/change_overview_path}.",
+        "utf-8",
+    )
+    router = FakeRouter(_result())
+    services = _services(
+        router, FakeStore(), FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit()
+    )
+    inputs = _inputs(tmp_path)
+    AgentNodeRunner(services, inputs).run(_ws_node(), _ctx(_ws_node()))
+    AgentNodeRunner(services, inputs).run(_readonly_agent(), _ctx(_readonly_agent()))
+    before, after = (request.prompt for request in router.requests)
+    assert before == "go."
+    assert after == f"go — overview /art/change-overview.txt from {'0' * 40}."
 
 
 def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -> None:

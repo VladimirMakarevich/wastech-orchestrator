@@ -1,6 +1,6 @@
 # Phase 05 — Core wiring
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** 02, 03, 04
 - **Delivers:** the one behavior change — every agent and evaluator request after the first edit carries the overview, the base and the where-to-start sentence chosen for its route; flows can name `{change_overview_path}` and `{diff_base}`; a resumed task hands off the same thing.
 

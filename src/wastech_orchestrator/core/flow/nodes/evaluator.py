@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from wastech_orchestrator.core.flow.change_guidance import change_guidance
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -486,6 +487,8 @@ class EvaluatorNodeRunner:
             task_path=self._in.task_path,
             plan_path=self._in.plan_path,
             diff_path=self._in.diff_path,
+            change_overview_path=self._in.change_overview_path,
+            diff_base=self._in.diff_base,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             conflicts_path=self._in.conflicts_path,
@@ -520,6 +523,28 @@ class EvaluatorNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+            change_guidance=self._change_guidance(node, ctx, route),
+        )
+
+    def _change_guidance(
+        self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
+    ) -> str | None:
+        """Where this evaluator should start on the change, or ``None`` before there is one.
+
+        Asks whether **every** provider on the route grants a shell — the opposite default to
+        :meth:`_attempt_has_shell`, which guards detection — so a reviewer is sent to inspect files
+        with commands only when it is sure to be able to, and otherwise to the full diff.
+        """
+        if self._in.change_overview_path is None or self._in.diff_base is None:
+            return None
+        return change_guidance(
+            base_sha=self._in.diff_base,
+            has_shell=self._s.router.route_always_grants_shell(
+                route,
+                permission_profile=node.permission_profile.value,
+                git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
+            ),
+            decomposed=ctx.subtask_order is not None,
         )
 
     def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:

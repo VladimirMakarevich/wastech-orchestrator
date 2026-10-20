@@ -14,7 +14,7 @@ Bottom-up, so every phase lands inert until the one that wires it in. The pure p
 | 02 | [Every-provider shell check](02-every-provider-shell-check.md) | `every_provider_grants_shell` + `AgentRouter.route_always_grants_shell` | — | ☑ |
 | 03 | [Git Manager writes the overview](03-git-manager-overview.md) | `change-overview.txt` beside `current.diff`: full-SHA base, since-last-commit section, `[denied]`, redaction | 01 | ☑ |
 | 04 | [Request fields and footer](04-request-fields-and-footer.md) | `AgentRunRequest` fields, footer rendering, containment, `request.json`, partial-diff clearing in the router | — | ☑ |
-| 05 | [Core wiring](05-core-wiring.md) | Nodes publish and pass the overview, the base and the guidance sentence; prompt variables; recovery | 02, 03, 04 | ☐ |
+| 05 | [Core wiring](05-core-wiring.md) | Nodes publish and pass the overview, the base and the guidance sentence; prompt variables; recovery | 02, 03, 04 | ☑ |
 | 06 | [Packaged prompts and guide](06-packaged-prompts-and-guide.md) | Rewritten `implementation` prompts, explicit whole-diff critics, guide pages, fake-CLI run | 05 | ☐ |
 
 01, 02 and 04 are independent and may land in any order.

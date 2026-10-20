@@ -43,6 +43,10 @@ def build_path_context(
     ``conflicts_path`` is the merge flow's conflict inventory — populated only while a conflicted
     base merge is being resolved, empty everywhere else.
 
+    ``change_overview_path`` and ``diff_base`` arrive with ``diff_path``: the bounded overview of
+    the change and the full SHA it is measured from. ``diff_base`` is the one entry that is not a
+    path but a commit — metadata the repository already holds, never content.
+
     ``report_dir`` is this flow's resolved report directory for this task
     (:func:`resolve_report_dir` — repo-relative POSIX, ``None`` for ``code_change``). It is the one
     entry that is not an artifact the orchestrator wrote: it is where the node is *told to write*,
@@ -54,6 +58,8 @@ def build_path_context(
         "task_path": inputs.task_path,
         "plan_path": inputs.plan_path,
         "diff_path": inputs.diff_path,
+        "change_overview_path": inputs.change_overview_path,
+        "diff_base": inputs.diff_base,
         "checks_path": inputs.checks_path,
         "review_path": inputs.review_path,
         "conflicts_path": inputs.conflicts_path,
