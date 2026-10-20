@@ -28,13 +28,14 @@ pull-request body when the oversight layer produces no prose, or does not run at
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_facts, read_final_diff
+from wastech_orchestrator.diff_overview import parse_diff, total_counts
+from wastech_orchestrator.ledger import INFRA_LOOP, Ledger
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
 
@@ -56,21 +57,25 @@ _STEP_DATA_MAX = 1_000
 #: least structured of the three and the one a chatty program grows without bound; the full stream
 #: stays on disk under the run directory.
 _STEP_STDOUT_MAX = 800
-#: Longest per-step evaluator findings. The largest cap of the three: a lens with ten rework rounds
-#: is the case this exists for, and its findings are what the pull-request body is written from.
-_STEP_FINDINGS_MAX = 2_000
+#: Per-step evaluator findings are rendered as a list, never as cut JSON text: a 2 000-character
+#: cut of a 38-finding verdict is what made the summary write "the findings list in the packet is
+#: truncated". Each finding keeps its severity, paths and gating flag whole; only its reason is
+#: bounded, and a step that would outgrow its budget says how many findings it left out. The node's
+#: final verdict — the one the pull-request body reports as open — gets the generous bounds; a
+#: verdict a later pass of the same node superseded gets the compact ones.
+_FINAL_FINDING_REASON_MAX = 1_200
+_FINAL_FINDINGS_BUDGET = 40_000
+_SUPERSEDED_FINDING_REASON_MAX = 300
+_SUPERSEDED_FINDINGS_BUDGET = 8_000
+#: All superseded verdicts of a packet together, so a long fix loop cannot grow the packet without
+#: bound: past it a superseded step keeps only its counts. Final verdicts are one per evaluator
+#: node, so their own budget bounds them already.
+_SUPERSEDED_FINDINGS_PACKET_BUDGET = 24_000
 #: Longest rendered observation digest; the oldest lines are dropped and the remainder is marked.
 _OBSERVATIONS_MAX = 8_000
 
 _ELLIPSIS = "…"
 _OBSERVATIONS_TRUNCATED = "(older observations dropped — digest bound reached)"
-
-# A unified diff's header lines. ``+++ b/<path>`` carries the path literally (spaces included), so
-# it is preferred over the ambiguous ``diff --git`` line — the same reasoning the packaged check
-# tools use. Both are read ONLY between a ``diff --git`` line and the file's first ``@@`` hunk
-# header: an unanchored match would read a deleted body line like ``--- x`` as a file header.
-_DIFF_OLD_PATH_RE = re.compile(r"^--- a/(.*)$")
-_DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
 
 
 def _bounded(text: str, limit: int) -> str:
@@ -120,6 +125,59 @@ class PacketFacts:
     diff_path: str | None
     findings_path: str | None
     material_observations: str | None
+    #: Earlier attempts of this task that stopped before the run that is now finishing — read from
+    #: the ledger, so the step record can say "the run stopped here and was resumed" between two
+    #: steps instead of leaving a rework verdict without its fix step to read as a lost record.
+    interruptions: tuple[Interruption, ...] = ()
+
+
+@dataclass(frozen=True)
+class Interruption:
+    """One earlier attempt of the task that ended without finishing, as its ledger record states."""
+
+    attempt: int
+    status: str
+    finished_at: str
+    node: str | None
+    loop: str | None
+    limit: str | None
+
+
+def read_interruptions(
+    artifacts_root: str | Path, task_id: str, *, since: str | None
+) -> tuple[Interruption, ...]:
+    """The task's ledger records that ended in something other than ``done``, oldest first.
+
+    ``since`` is the first step's start: a fresh rerun deleted the steps an older attempt ran, so an
+    interruption from before the surviving record would sit next to steps it has nothing to do with.
+    Best-effort — an unreadable ledger yields none, the packet must still build.
+    """
+    try:
+        records = Ledger(Path(artifacts_root) / "logs").records()
+    except (OSError, ValueError):
+        return ()
+    found = []
+    for record in records:
+        finished = record.get("finished_at")
+        if record.get("id") != task_id or record.get("final_status") == "done":
+            continue
+        if not isinstance(finished, str) or (since is not None and finished < since):
+            continue
+        found.append(
+            Interruption(
+                attempt=int(record.get("attempt") or 0),
+                status=str(record.get("final_status") or ""),
+                finished_at=finished,
+                node=_opt_str(record.get("stop_node")),
+                loop=_opt_str(record.get("stuck_loop")),
+                limit=_opt_str(record.get("stuck_limit")),
+            )
+        )
+    return tuple(found)
+
+
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 class PacketStorePort(Protocol):
@@ -166,6 +224,7 @@ def build_packet_facts(
     ``None`` for every caller that has no observations to carry.
     """
     node_runs = tuple(store.get_node_runs(task_id))
+    first_start = next((row.started_at for row in node_runs if row.started_at), None)
     return PacketFacts(
         task_id=task_id,
         task_title=task_title,
@@ -179,6 +238,7 @@ def build_packet_facts(
         ),
         findings_path=_findings_relpath(artifacts_root, repo_dir, task_id, evaluations),
         material_observations=material_observations,
+        interruptions=read_interruptions(artifacts_root, task_id, since=first_start),
     )
 
 
@@ -231,7 +291,7 @@ def render_packet(facts: PacketFacts) -> str:
         "task": {"id": facts.task_id, "title": facts.task_title, "type": facts.task_type},
         "flow": {"name": facts.flow_name},
         "changes": _changes(facts.diff_text, facts.diff_path),
-        "steps": _steps(facts.steps),
+        "steps": _steps(facts.steps, facts.interruptions),
         "checks": _checks(facts.check_runs),
         "findings_path": facts.findings_path,
         "material_observations": _observations(facts.material_observations),
@@ -254,35 +314,14 @@ def summarize_diff(diff_text: str) -> DiffSummary:
     Derived from the ``current.diff`` **artifact** rather than from a live ``git diff --stat``: a
     fresh git invocation reads the working tree, which is not durable state, so it would break the
     pure-function contract the reproducibility criterion rests on — for the packet and equally for
-    the committed report rendered from the same facts.
+    the committed report rendered from the same facts. A fold over
+    :func:`~wastech_orchestrator.diff_overview.parse_diff`, the parser the change overview handed to
+    agents is rendered from, so the pull request and the overview cannot disagree about one diff.
     """
-    paths: list[str] = []
-    insertions = 0
-    deletions = 0
-    in_header = False
-    old_path: str | None = None
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            in_header, old_path = True, None
-            continue
-        if in_header:
-            if line.startswith("--- "):
-                match = _DIFF_OLD_PATH_RE.match(line)
-                old_path = match.group(1).strip() if match else None
-            elif line.startswith("+++ "):
-                match = _DIFF_NEW_PATH_RE.match(line)
-                # ``+++ /dev/null`` is a deletion: the file it names is on the ``---`` line.
-                path = match.group(1).strip() if match else old_path
-                if path and path not in paths:
-                    paths.append(path)
-            elif line.startswith("@@"):
-                in_header = False
-            continue
-        if line.startswith("+"):
-            insertions += 1
-        elif line.startswith("-"):
-            deletions += 1
-    return DiffSummary(paths=tuple(paths), insertions=insertions, deletions=deletions)
+    entries = parse_diff(diff_text)
+    insertions, deletions = total_counts(entries)
+    paths = tuple(dict.fromkeys(entry.path for entry in entries))
+    return DiffSummary(paths=paths, insertions=insertions, deletions=deletions)
 
 
 def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
@@ -302,7 +341,9 @@ def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
     return changes
 
 
-def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
+def _steps(
+    steps: Sequence[StepFacts], interruptions: Sequence[Interruption] = ()
+) -> list[dict[str, Any]]:
     """The step record rendered in execution order, each run with its closing message if it has one.
 
     Timestamps, ``stage_attempts``, the provider actually used, and the fallback/retry facts are
@@ -321,7 +362,12 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
     and half of a JSON object is not JSON.
     """
     rendered: list[dict[str, Any]] = []
-    for facts in steps:
+    pending = sorted(interruptions, key=lambda item: item.finished_at)
+    final_verdicts = _final_verdict_indexes(steps)
+    superseded_left = _SUPERSEDED_FINDINGS_PACKET_BUDGET
+    for index, facts in enumerate(steps):
+        while pending and facts.started_at and pending[0].finished_at <= facts.started_at:
+            rendered.append(_interruption_entry(pending.pop(0)))
         step: dict[str, Any] = {
             "node": facts.node_id,
             "kind": facts.node_kind,
@@ -351,9 +397,96 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
         if facts.tool_stdout and facts.tool_stdout.strip():
             step["stdout_head"] = _bounded(facts.tool_stdout, _STEP_STDOUT_MAX)
         if facts.findings and facts.findings.strip() not in ("", "[]", "{}"):
-            step["findings"] = _bounded(facts.findings, _STEP_FINDINGS_MAX)
+            final = index in final_verdicts
+            budget = (
+                _FINAL_FINDINGS_BUDGET
+                if final
+                else min(_SUPERSEDED_FINDINGS_BUDGET, superseded_left)
+            )
+            entry, used = _findings_entry(facts.findings, final=final, budget=budget)
+            if not final:
+                superseded_left -= used
+            step.update(entry)
         rendered.append(step)
+    rendered.extend(_interruption_entry(item) for item in pending)
     return rendered
+
+
+def _final_verdict_indexes(steps: Sequence[StepFacts]) -> set[int]:
+    """The index of each evaluator node's last verdict-carrying step (per subtask)."""
+    last: dict[tuple[str, int | None], int] = {}
+    for index, facts in enumerate(steps):
+        if facts.findings is not None:
+            last[(facts.node_id, facts.subtask_order)] = index
+    return set(last.values())
+
+
+def _findings_entry(findings_json: str, *, final: bool, budget: int) -> tuple[dict[str, Any], int]:
+    """The step's findings as a list of whole items, bounded per reason and by ``budget``.
+
+    Returns the entry and the characters it used. ``findings_total`` counts the well-formed findings
+    and ``findings_omitted`` only those the budget cut, so "omitted" always means "there was more";
+    an entry that is not a finding at all is counted apart as ``findings_malformed``. Unparseable
+    JSON degrades to the bounded text it used to be — this is an advisory surface, so a malformed
+    row costs its structure, never the packet.
+    """
+    reason_max = _FINAL_FINDING_REASON_MAX if final else _SUPERSEDED_FINDING_REASON_MAX
+    try:
+        parsed = json.loads(findings_json)
+    except json.JSONDecodeError:
+        text = _bounded(findings_json, reason_max)
+        return {"findings": text}, len(text)
+    if not isinstance(parsed, list):
+        text = _bounded(findings_json, reason_max)
+        return {"findings": text}, len(text)
+    well_formed = [raw for raw in parsed if isinstance(raw, dict)]
+    items: list[dict[str, Any]] = []
+    used = 0
+    for raw in well_formed:
+        # Every field the row recorded, whole; only free text is bounded.
+        item = {
+            key: _bounded(value, reason_max) if isinstance(value, str) else value
+            for key, value in raw.items()
+            if value is not None
+        }
+        size = len(json.dumps(item, ensure_ascii=False))
+        if used + size > budget and (items or not final):
+            break
+        items.append(item)
+        used += size
+    entry: dict[str, Any] = {"findings": items, "findings_total": len(well_formed)}
+    if len(items) < len(well_formed):
+        entry["findings_omitted"] = len(well_formed) - len(items)
+    if len(well_formed) < len(parsed):
+        entry["findings_malformed"] = len(parsed) - len(well_formed)
+    if not final:
+        entry["findings_superseded"] = True
+    return entry, used
+
+
+def _interruption_entry(item: Interruption) -> dict[str, Any]:
+    """A record line between two steps: the run stopped here and an operator resumed it."""
+    why = ""
+    # `infra` is how an older ledger record spelled "no fix loop": an infrastructure or operator
+    # stop, whose limit is a reason, not a budget.
+    loop = item.loop if item.loop != INFRA_LOOP else None
+    if loop and item.limit:
+        why = f" — the {loop!r} fix loop reached {item.limit}"
+    elif item.limit:
+        why = f" — {item.limit}"
+    where = f" at {item.node!r}" if item.node else ""
+    return {
+        "kind": "interruption",
+        "status": item.status,
+        "finished_at": item.finished_at,
+        "attempt": item.attempt,
+        "note": (
+            f"the run stopped{where} ({item.status}){why}, and an operator resumed it with "
+            "`rerun`. No node ran in between: a rework verdict right before this point was not "
+            "followed by its fix step because the run stopped, not because a step is missing "
+            "from the record"
+        ),
+    }
 
 
 def _label_unfinished_publish(step: dict[str, Any], facts: StepFacts) -> None:

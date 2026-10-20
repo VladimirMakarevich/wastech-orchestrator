@@ -138,7 +138,7 @@ An entry for a file still queued in `tasks/pending/` adds `file` (the filename),
 Two things a consumer has to know:
 
 - **`--all` lists database rows only.** A queued file has no row yet, so it appears in the default view and under `--pending`, never under `--all`. Conversely the default view's `recent` section is capped at the last few terminal tasks — `--all` is the uncapped view of everything the database holds.
-- **`status` is a display label, not the raw status.** It is the status value (`new`, `validated`, `preparing`, `running`, `pending`, `done`, `failed`, `manual_action_required`) with a parenthesised suffix wherever the bare word would mislead: `running (paused)` and `running (paused until <timestamp>)` while a provider outage is waited out, and `parked (no daemon)` for a `running` task whose executor is gone (parked at its checkpoint, not executing). Match the **leading token**, not the whole string, and read `parked` as a running task that is not moving. One further value, `rejected`, is not a task status at all — see below.
+- **`status` is a display label, not the raw status.** It is the status value (`new`, `validated`, `preparing`, `running`, `pending`, `done`, `failed`, `manual_action_required`) with a parenthesised suffix wherever the bare word would mislead: `running (paused)` and `running (paused until <timestamp>)` while a provider outage is waited out, and `parked (no daemon)` for a `running` task with no live executor — neither the watch daemon nor a `run`/`rerun` (parked at its checkpoint, not executing). Match the **leading token**, not the whole string, and read `parked` as a running task that is not moving. One further value, `rejected`, is not a task status at all — see below.
 
 ### Rejected tasks
 

@@ -1342,7 +1342,7 @@ def test_write_current_diff(
     gm = _manager(git_repo, store, art, make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "README.md").write_text("changed\n", encoding="utf-8")
-    path = gm.write_current_diff("task-001")
+    path = gm.write_current_diff("task-001").diff_path
     assert Path(path).exists()
     assert "README.md" in Path(path).read_text(encoding="utf-8")
 
@@ -1358,7 +1358,7 @@ def test_write_current_diff_includes_committed_change(
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
     gm.commit_code("task-001", "feat: feature")
-    path = gm.write_current_diff("task-001")
+    path = gm.write_current_diff("task-001").diff_path
     body = Path(path).read_text(encoding="utf-8")
     assert "feature.py" in body and "value = 42" in body
 
@@ -1372,7 +1372,7 @@ def test_write_current_diff_includes_untracked_file(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (git_repo.clone / "new_module.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert "new_module.py" in diff
     assert "return 1" in diff
     # The bracket restored the pre-existing untracked state — no persistent index mutation.
@@ -1393,7 +1393,7 @@ def test_write_current_diff_renders_nul_content_as_text(
     git_run(["add", "fixture.dat"], git_repo.clone)
     git_run(["commit", "-m", "add nul fixture"], git_repo.clone)
     nul_path.write_bytes(b"after\x00marker\n")
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert "Binary files differ" not in diff
     assert "after" in diff
 
@@ -1416,7 +1416,7 @@ def test_write_current_diff_excludes_the_tracked_runtime_home(
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     (worc_home / "config.yaml").write_text("poll_interval_seconds: 30\n", encoding="utf-8")
     (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert "feature.py" in diff and "value = 42" in diff  # the task's own change is still there
     assert RUNTIME_EXCLUDED_DIRS[0] not in diff
     assert "poll_interval_seconds" not in diff
@@ -1506,7 +1506,7 @@ def test_current_diff_on_chain_branch_excludes_prior_task(
         "task-002", "x", epoch=_EPOCH, mode=BranchMode.EXISTING, branch_ref="feature/chain"
     )
     (git_repo.clone / "this_task.py").write_text("this = 2\n", encoding="utf-8")
-    diff = Path(gm.write_current_diff("task-002")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-002").diff_path).read_text(encoding="utf-8")
     assert "this_task.py" in diff  # this task's change is present
     assert "prior_task.py" not in diff  # the prior chain task is NOT (base = branch tip at start)
 
@@ -2163,7 +2163,7 @@ def test_current_diff_is_redacted(
     (git_repo.clone / "README.md").write_text(
         f"# project\nleak {token}\ncopied {file_secret}\n", encoding="utf-8"
     )
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert token not in diff
     assert file_secret not in diff
 
@@ -3052,7 +3052,7 @@ def test_the_gate_and_the_reported_diff_measure_the_same_paths(
     (git_repo.clone / "b.py").write_text("b = 1\n", encoding="utf-8")  # left uncommitted
 
     gate_paths = {e.path for e in gm.changed_code_entries("task-001")}
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert gate_paths == {"a.py", "b.py"}
     assert "a.py" in diff and "b.py" in diff
 
@@ -3077,7 +3077,7 @@ def test_a_subtask_commit_moves_the_reference_so_the_next_one_is_not_re_asked(
     (git_repo.clone / "new.py").write_text("n = 1\n", encoding="utf-8")  # subtask 2: something else
     gate_paths = {e.path for e in gm.changed_code_entries("task-001")}
     assert gate_paths == {"new.py"}  # the deletion is behind the reference now
-    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001").diff_path).read_text(encoding="utf-8")
     assert "doomed.py" in diff and "new.py" in diff  # the report keeps the whole task
 
 

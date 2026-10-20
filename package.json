@@ -11,8 +11,8 @@
     "mdlint": "python tools/mdlint.py"
   },
   "devDependencies": {
-    "@wastech-mdlint/cli": "0.1.1",
-    "@wastech-mdlint/core": "0.1.1",
-    "@wastech-mdlint/mcp-server": "0.1.1"
+    "@wastech-mdlint/cli": "0.2.1",
+    "@wastech-mdlint/core": "0.2.1",
+    "@wastech-mdlint/mcp-server": "0.2.1"
   }
 }

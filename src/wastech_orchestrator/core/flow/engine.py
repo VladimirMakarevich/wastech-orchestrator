@@ -48,7 +48,12 @@ from wastech_orchestrator.core.flow.schema import (
     ToolNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.core.loop_control import global_cap, loop_cap, record_rework
+from wastech_orchestrator.core.loop_control import (
+    ReworkRefusal,
+    edge_key,
+    record_rework,
+    rework_refusal,
+)
 from wastech_orchestrator.core.state_machine import Status
 
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
@@ -136,10 +141,11 @@ class NodeOutcome:
 
     ``rework_exhausted`` is set by the evaluator runner on the one ``accept`` where a
     **non-blocking** evaluator gave up: it still found a gating issue but its per-instance
-    ``max_rework_per_stage`` budget was spent, so it takes ``accept`` (→ continue) with findings
-    still open. The engine never inspects it (``accept`` is ``accept`` for routing); the
-    orchestrator's post-node hook surfaces it as an operator warning + Telegram trace so a human
-    knows the stage moved on and may need follow-up.
+    ``max_rework_per_stage`` budget — or the engine's budget for its rework edge — was spent, so it
+    takes ``accept`` (→ continue) with findings still open; ``rework_limit`` names which one. The
+    engine never inspects it (``accept`` is ``accept`` for routing); the orchestrator's post-node
+    hook surfaces it as an operator warning + Telegram trace so a human knows the stage moved on and
+    may need follow-up.
 
     ``unexpected_write`` is the same shape of signal for a different event: a node that had a way to
     run commands but no write access changed the working tree, which the provider's sandbox is
@@ -183,10 +189,21 @@ class NodeOutcome:
     structured_output: Mapping[str, object] | None = None
     final_message: str | None = None
     rework_exhausted: bool = False
+    #: Set beside ``rework_exhausted``: which limit ended the rounds, in operator words.
+    rework_limit: str | None = None
+    #: The stage ran on a provider other than the one it was routed to (see
+    #: :func:`~wastech_orchestrator.core.flow.nodes.base.provider_fallback_note`); warned, never
+    #: routed on.
+    provider_fallback: str | None = None
     unexpected_write: bool = False
     git_control_drift: str | None = None
     adopted_commits: tuple[str, ...] = ()
     gating_findings_name_no_path: bool = False
+
+
+def _advisory(node: FlowNode) -> bool:
+    """A non-blocking evaluator: its rework rounds are advisory and it never parks the task."""
+    return isinstance(node, EvaluatorNode) and not node.blocking
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:
@@ -220,6 +237,9 @@ class NodeContext:
     node: FlowNode
     task_id: str
     subtask_order: int | None = None
+    #: The limit that would refuse this node's ``rework`` edge if it asked for one now (see
+    #: :meth:`FlowEngine._node_rework_refusal`), or ``None`` when another fix round is available.
+    rework_refusal: str | None = None
 
 
 class NodeRunner(Protocol):
@@ -281,9 +301,13 @@ _REPEATED_FINDINGS_LIMIT = 3
 _NO_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType({})
 
 
-def edge_key(edge: Edge) -> str:
-    """Synthetic ``loop_counters`` key for an inline ``budget`` edge (no named loop)."""
-    return f"{edge.from_node}->{edge.to}:{edge.outcome}"
+def _describe_refusal(refused: ReworkRefusal) -> str:
+    """One operator-readable phrase for the limit that refuses a rework edge."""
+    if refused.limit_name == "max_fix_cycles":
+        return f"fix loop {refused.loop!r} budget spent (min of its flow budget and max_fix_cycles)"
+    if refused.limit_name == "max_total_fix_iterations":
+        return "global fix backstop spent (max_total_fix_iterations)"
+    return f"inline rework budget spent ({refused.limit_name})"
 
 
 #: Called after each *executed* (non-skipped) node with ``(node, outcome, node_run_id)`` so the core
@@ -406,7 +430,12 @@ class FlowEngine:
                 # EXPERIMENTAL(no-work-infra): abort a no-effective-work stall BEFORE charging
                 # rework, so a frozen fix loop is not counted toward its fix budget (it is not real
                 # work); else the budget cap. Drop the `_check_stall` line to disable the guard.
-                stuck = self._check_stall(node.id, edge.loop) if edge.loop is not None else None
+                # A non-blocking evaluator is exempt from the stall guards: it is self-capped by
+                # its own `max_rework_per_stage` and accepts instead of parking, so a guard that
+                # parks it would break the one promise that node kind makes.
+                stuck = None
+                if edge.loop is not None and not _advisory(node):
+                    stuck = self._check_stall(node.id, edge.loop)
                 if stuck is None:
                     stuck = self._charge_rework(edge)
                 if stuck is not None:
@@ -463,6 +492,7 @@ class FlowEngine:
             node=node,
             task_id=self._task_id,
             subtask_order=self._subtask_order,
+            rework_refusal=self._node_rework_refusal(node),
         )
         result = runner.run(node, ctx)
         if self._post_node is not None:
@@ -571,29 +601,50 @@ class FlowEngine:
         """Charge a rework/fail edge against the global counter plus its loop/inline budget.
 
         Returns a :class:`_Stuck` when a limit is reached (the edge must not be taken), else
-        ``None``. The per-loop / inline limit is reported before the global cap when both trip on
-        the same entry.
+        ``None``. The limit is checked before anything is charged — a budget of N is N fix rounds,
+        for a named loop, an inline ``budget: N`` and the global backstop alike — and the per-loop /
+        inline limit is reported before the global cap when both are reached.
 
         The single global ``fix_iterations`` increment goes through
         :func:`~wastech_orchestrator.core.loop_control.record_rework` — the one accounting path
         shared by every in-flow rework/fail edge (``test_fix`` and ``review_fix`` alike), so a
         rework is never double-counted (anchored by ``test_record_rework_single_increment``).
         """
-        glob = record_rework(self._run_state)
+        refused = self._rework_refusal(edge)
+        if refused is not None:
+            return _Stuck(loop=refused.loop, limit_name=refused.limit_name)
+        record_rework(self._run_state)
         if edge.loop is not None:
-            cycles = self._run_state.bump(edge.loop)
+            self._run_state.bump(edge.loop)
             # Cumulative per-loop total for the audit trail: bumped on every rework of this
             # loop, never reset on a forward edge, so a converged loop is not attributed 0.
             self._run_state.bump(FlowRunState.total_key(edge.loop))
-            if cycles >= self._loop_cap(edge.loop):
-                return _Stuck(loop=edge.loop, limit_name="max_fix_cycles")
         elif edge.budget is not None:
-            key = edge_key(edge)
-            if self._run_state.counter(key) >= edge.budget:
-                return _Stuck(loop=None, limit_name=f"budget:{edge.from_node}->{edge.to}")
-            self._run_state.bump(key)
-        if glob >= self._global_cap():
-            return _Stuck(loop=edge.loop, limit_name="max_total_fix_iterations")
+            self._run_state.bump(edge_key(edge))
+        return None
+
+    def _rework_refusal(self, edge: Edge) -> ReworkRefusal | None:
+        return rework_refusal(
+            self._snapshot,
+            self._run_state,
+            edge,
+            max_fix_cycles=self._agents.max_fix_cycles,
+            max_total_fix_iterations=self._agents.max_total_fix_iterations,
+        )
+
+    def _node_rework_refusal(self, node: FlowNode) -> str | None:
+        """The limit that would refuse ``node``'s rework edge right now, or ``None``.
+
+        Handed to the node before it runs (:attr:`NodeContext.rework_refusal`) so a non-blocking
+        evaluator, which never parks by contract, can accept with its findings still open instead
+        of asking for a round the engine would refuse.
+        """
+        for edge in self._snapshot.adjacency.get(node.id, ()):
+            if edge.outcome != "rework":
+                continue
+            refused = self._rework_refusal(edge)
+            if refused is not None:
+                return _describe_refusal(refused)
         return None
 
     def _reset_loops_at(self, node_id: str) -> None:
@@ -614,9 +665,3 @@ class FlowEngine:
                 self._stall_fp.pop(edge.loop, None)
             elif edge.budget is not None:
                 self._run_state.reset(edge_key(edge))
-
-    def _loop_cap(self, loop: str) -> int:
-        return loop_cap(self._snapshot.doc.budgets, self._agents.max_fix_cycles, loop)
-
-    def _global_cap(self) -> int:
-        return global_cap(self._snapshot.doc.budgets, self._agents.max_total_fix_iterations)

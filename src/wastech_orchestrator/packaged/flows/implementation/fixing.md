@@ -1,5 +1,7 @@
 Address the failing checks and/or blocking review findings recorded in the context files. Make the minimal change that fully resolves them — including other instances of the same defect the findings reveal (see "Fix The Finding, Then Its Class"). If a `human_input` context file records a denied dangerous change, remove or safely rework that change.
 
+A fix starts from the review findings and the failed check log, not from the change as a whole: they name what to fix and where. Use the change overview{?change_overview_path} at {change_overview_path}{/change_overview_path} only to locate the files they point at, and open the full diff only when a finding cannot be placed without it — the change is already in the working tree.
+
 ## Scope Discipline
 
 - Stay strictly within scope: fix only what _your_ change broke and what the task asked for. Do not edit files outside the task's scope to chase an unrelated failure.

@@ -17,11 +17,12 @@ from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers import codex as codex_mod
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.claude import SandboxCapability
-from wastech_orchestrator.routing.router import AgentRouter
+from wastech_orchestrator.routing.router import AgentRouter, ResolvedRoute, RouteSource
 from wastech_orchestrator.security.shell_reach import (
     ShellCheck,
     ShellQuery,
     any_provider_grants_shell,
+    every_provider_grants_shell,
 )
 
 
@@ -233,6 +234,53 @@ def test_the_dispatcher_answers_from_the_bound_table(base_config: OrchestratorCo
     assert (claude_only, with_codex) == (False, True)
 
 
+def test_every_provider_must_grant_a_shell(base_config: OrchestratorConfig) -> None:
+    # The question a node's instructions are chosen by: told to inspect the change with commands, a
+    # node must be able to run them on whichever end of its route serves it.
+    configs = base_config.agents.providers
+    codex = every_provider_grants_shell([ProviderId.CODEX], configs, _checks(), _query("read-only"))
+    with_claude = every_provider_grants_shell(
+        [ProviderId.CODEX, ProviderId.CLAUDE], configs, _checks(), _query("read-only")
+    )
+    assert (codex, with_claude) == (True, False)
+    assert (
+        every_provider_grants_shell(
+            [ProviderId.CODEX, ProviderId.CLAUDE], configs, _checks(), _query("workspace-write")
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured", "bound"),
+    [
+        pytest.param(False, True, id="no config block"),
+        pytest.param(True, False, id="no bound check"),
+    ],
+)
+def test_an_unknown_answer_is_no_shell_for_every_but_a_shell_for_any(
+    base_config: OrchestratorConfig, configured: bool, bound: bool
+) -> None:
+    # The two questions fail closed in opposite directions on the same inputs: detection brackets
+    # an attempt it cannot classify, while a node is never told to run a command it may not have.
+    providers = [ProviderId.CODEX, ProviderId.CLAUDE]
+    configs = dict(base_config.agents.providers)
+    checks = _checks()
+    if not configured:
+        del configs[ProviderId.CLAUDE]
+    if not bound:
+        del checks[ProviderId.CLAUDE]
+    query = _query("workspace-write")
+    assert every_provider_grants_shell(providers, configs, checks, query) is False
+    assert any_provider_grants_shell(providers, configs, checks, query) is True
+
+
+def test_an_empty_provider_list_has_no_shell(base_config: OrchestratorConfig) -> None:
+    assert (
+        every_provider_grants_shell([], base_config.agents.providers, _checks(), _query()) is False
+    )
+
+
 # --- the Router's per-route query -----------------------------------------------------------------
 
 
@@ -301,3 +349,55 @@ def test_the_route_query_gives_a_read_only_node_a_shell_in_the_advanced_mode(
             route, permission_profile="read-only", git_evidence=False
         )
         assert answer is expected
+
+
+def test_the_always_query_follows_the_most_restrictive_end(base_config: OrchestratorConfig) -> None:
+    # Codex alone runs commands on every profile; a Claude read-only node without the grant has no
+    # shell under strict isolation; a route that can fall back from Codex to that Claude node gets
+    # the answer of its weaker end, because the request it is handed is built once for both.
+    router = AgentRouter(base_config, _providers(), shell_checks=_checks())
+    codex_only = ResolvedRoute(
+        node_id="review", primary=ProviderId.CODEX, fallback=None, source=RouteSource.FLOW_NODE
+    )
+    claude_only = ResolvedRoute(
+        node_id="review", primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.FLOW_NODE
+    )
+    mixed = router.resolve_route("review", ProviderId.CODEX)
+    assert (mixed.primary, mixed.fallback) == (ProviderId.CODEX, ProviderId.CLAUDE)
+    answers = [
+        router.route_always_grants_shell(route, permission_profile="read-only", git_evidence=False)
+        for route in (codex_only, claude_only, mixed)
+    ]
+    assert answers == [True, False, False]
+    # The detection question on the same mixed route still answers yes.
+    assert router.route_grants_shell(mixed, permission_profile="read-only", git_evidence=False)
+
+
+def test_the_always_query_drops_the_shell_on_native_windows(
+    base_config: OrchestratorConfig,
+) -> None:
+    # Claude on native Windows under strict isolation has no sandbox for Bash, so even a
+    # workspace-write node is not told to inspect the change with commands there.
+    router = AgentRouter(
+        base_config, _providers(), shell_checks=_checks(SandboxCapability.NATIVE_WINDOWS)
+    )
+    route = ResolvedRoute(
+        node_id="review", primary=ProviderId.CLAUDE, fallback=None, source=RouteSource.FLOW_NODE
+    )
+    assert (
+        router.route_always_grants_shell(
+            route, permission_profile="workspace-write", git_evidence=False
+        )
+        is False
+    )
+
+
+def test_an_unwired_router_never_promises_a_shell(base_config: OrchestratorConfig) -> None:
+    router = AgentRouter(base_config, _providers())
+    route = router.resolve_route("review")
+    assert (
+        router.route_always_grants_shell(
+            route, permission_profile="workspace-write", git_evidence=False
+        )
+        is False
+    )

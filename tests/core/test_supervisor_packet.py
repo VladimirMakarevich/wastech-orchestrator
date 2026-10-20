@@ -17,6 +17,8 @@ from wastech_orchestrator.core.supervisor_packet import (
     split_check_runs,
     summarize_diff,
 )
+from wastech_orchestrator.diff_overview import parse_diff
+from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDOUT_FILENAME,
     node_run_dir,
@@ -252,8 +254,8 @@ def test_each_evaluator_step_carries_its_own_findings(tmp_path: Path) -> None:
     _record_verdict(store, "fidelity_critic", first, '[{"title": "meaning drifted"}]')
     _record_verdict(store, "voice_critic", second, '[{"title": "register too formal"}]')
     steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
-    assert "meaning drifted" in steps[0]["findings"]
-    assert "register too formal" in steps[1]["findings"]
+    assert steps[0]["findings"] == [{"title": "meaning drifted"}]
+    assert steps[1]["findings"] == [{"title": "register too formal"}]
 
 
 def test_an_empty_verdict_adds_no_findings_key(tmp_path: Path) -> None:
@@ -330,6 +332,18 @@ def test_summarize_diff_of_nothing_is_empty(tmp_path: Path) -> None:
     assert summary.paths == () and summary.insertions == 0 and summary.deletions == 0
 
 
+def test_summarize_diff_is_a_fold_over_the_shared_parser() -> None:
+    # The change overview handed to agents is rendered from `parse_diff`; the PR body's stat must
+    # describe the same change, so its totals are the parser's, not a second reading of the text.
+    entries = parse_diff(_DIFF)
+    summary = summarize_diff(_DIFF)
+    assert summary.paths == tuple(entry.path for entry in entries)
+    assert (summary.insertions, summary.deletions) == (
+        sum(entry.added for entry in entries),
+        sum(entry.removed for entry in entries),
+    )
+
+
 def test_split_check_runs_keeps_skipped_out_of_failed(tmp_path: Path) -> None:
     rows = (
         CheckRunRow(task_id=_TASK, command="ruff check .", passed=True, log_path="a"),
@@ -342,3 +356,151 @@ def test_split_check_runs_keeps_skipped_out_of_failed(tmp_path: Path) -> None:
     # that matters — it reads as a quality verdict the run never reached.
     assert outcomes.failed == ("pytest -q",)
     assert outcomes.skipped == ("npm test",)
+
+
+# -- what a run that stopped and resumed leaves in the record (enrich-07b) -------------------------
+
+
+def _timed_run(store: StateStore, node: str, kind: str, start: str, outcome: str) -> int:
+    return store.record_node_run(
+        NodeRunRow(
+            task_id=_TASK,
+            node_id=node,
+            node_kind=kind,
+            status="succeeded",
+            outcome=outcome,
+            started_at=start,
+            finished_at=start,
+        )
+    )
+
+
+def test_a_long_verdict_reaches_the_packet_whole(tmp_path: Path) -> None:
+    # sources_gate's last pass reported 30 findings; the packet cut their JSON at 2 000 characters,
+    # and the summary wrote "the findings list in the packet is truncated" into the PR body.
+    store = _store(tmp_path)
+    run_id = _run_row(store, "sources_gate", "evaluator", outcome="accept")
+    findings = [
+        {"severity": "medium", "reason": f"finding {n}: " + "x" * 400, "paths": [f"r.md:{n}"]}
+        for n in range(30)
+    ]
+    _record_verdict(store, "sources_gate", run_id, json.dumps(findings))
+    step = json.loads(render_packet(_facts(tmp_path, store)))["steps"][0]
+    assert step["findings_total"] == 30
+    assert "findings_omitted" not in step
+    assert [item["reason"].split(":")[0] for item in step["findings"]] == [
+        f"finding {n}" for n in range(30)
+    ]
+    assert step["findings"][7]["paths"] == ["r.md:7"]
+
+
+def test_a_superseded_verdict_is_compact_but_still_counts_every_finding(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = _run_row(store, "gate", "evaluator", outcome="rework")
+    second = _run_row(store, "gate", "evaluator", outcome="accept")
+    many = [{"severity": "low", "reason": "y" * 1_000} for _ in range(40)]
+    _record_verdict(store, "gate", first, json.dumps(many))
+    _record_verdict(store, "gate", second, json.dumps(many[:2]))
+    steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
+    assert steps[0]["findings_superseded"] is True
+    assert steps[0]["findings_total"] == 40
+    # Cut, and saying so — never silently.
+    assert steps[0]["findings_omitted"] == 40 - len(steps[0]["findings"])
+    assert "findings_superseded" not in steps[1]
+
+
+def test_a_stop_and_resume_between_two_passes_is_on_the_record(tmp_path: Path) -> None:
+    # sources_gate reworked, the loop budget was spent, the task parked, and `rerun --continue` ran
+    # the gate again. The record showed rework → gate with nothing between, which the summary read
+    # as "the fix step between the second and third pass is not recorded".
+    store = _store(tmp_path)
+    _timed_run(store, "sources_gate", "evaluator", "2026-10-19T15:38:37+00:00", "rework")
+    _timed_run(store, "sources_gate", "evaluator", "2026-10-19T16:01:58+00:00", "accept")
+    ledger = Ledger(_art(tmp_path) / "logs")
+    ledger.append(
+        LedgerRecord(
+            id=_TASK,
+            title="T",
+            final_status="manual_action_required",
+            finished_at="2026-10-19T15:55:39+00:00",
+            stop_node="sources_gate",
+            stuck_loop="sources_fix",
+            stuck_limit="max_fix_cycles",
+        )
+    )
+    ledger.append(  # a different task's stop is not this task's business
+        LedgerRecord(
+            id="other",
+            title="O",
+            final_status="manual_action_required",
+            finished_at="2026-10-19T15:56:00+00:00",
+        )
+    )
+    steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
+    assert [step.get("kind") for step in steps] == ["evaluator", "interruption", "evaluator"]
+    note = steps[1]["note"]
+    assert "'sources_gate'" in note and "'sources_fix'" in note and "max_fix_cycles" in note
+    assert "not because a step is missing" in note
+
+
+def test_an_interruption_older_than_the_record_is_left_out(tmp_path: Path) -> None:
+    # A fresh rerun deleted the steps the older attempt ran; its stop has nothing to sit between.
+    store = _store(tmp_path)
+    _timed_run(store, "review", "evaluator", "2026-10-19T16:00:00+00:00", "accept")
+    Ledger(_art(tmp_path) / "logs").append(
+        LedgerRecord(
+            id=_TASK,
+            title="T",
+            final_status="failed",
+            finished_at="2026-10-19T12:00:00+00:00",
+        )
+    )
+    steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
+    assert [step.get("kind") for step in steps] == ["evaluator"]
+
+
+def test_superseded_verdicts_share_one_budget_across_the_packet(tmp_path: Path) -> None:
+    # A fifteen-round loop must not grow the packet fifteen-fold: past the shared budget a
+    # superseded verdict keeps its counts and nothing else.
+    store = _store(tmp_path)
+    verdict = json.dumps([{"severity": "low", "reason": "z" * 250} for _ in range(30)])
+    for _ in range(12):
+        run_id = _run_row(store, "review", "evaluator", outcome="rework")
+        _record_verdict(store, "review", run_id, verdict)
+    steps = json.loads(render_packet(_facts(tmp_path, store)))["steps"]
+    superseded = [step for step in steps if step.get("findings_superseded")]
+    assert len(superseded) == 11
+    assert sum(len(json.dumps(step["findings"])) for step in superseded) <= 24_000 + 11 * 2
+    assert superseded[-1]["findings"] == []
+    assert superseded[-1]["findings_omitted"] == 30
+    assert "findings_superseded" not in steps[-1]
+
+
+def test_an_entry_that_is_not_a_finding_is_not_reported_as_cut(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    run_id = _run_row(store, "gate", "evaluator", outcome="accept")
+    _record_verdict(store, "gate", run_id, json.dumps(["stray note", {"severity": "low"}]))
+    step = json.loads(render_packet(_facts(tmp_path, store)))["steps"][0]
+    assert step["findings_total"] == 1
+    assert "findings_omitted" not in step
+    assert step["findings_malformed"] == 1
+
+
+def test_an_older_infra_stop_is_not_called_a_fix_loop(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _timed_run(store, "thinkers", "agent", "2026-10-19T14:30:00+00:00", "done")
+    _timed_run(store, "thinkers", "agent", "2026-10-19T16:00:00+00:00", "done")
+    Ledger(_art(tmp_path) / "logs").append(
+        LedgerRecord(
+            id=_TASK,
+            title="T",
+            final_status="failed",
+            finished_at="2026-10-19T15:00:00+00:00",
+            stop_node="thinkers",
+            stuck_loop="infra",
+            stuck_limit="background_work_lost",
+        )
+    )
+    note = json.loads(render_packet(_facts(tmp_path, store)))["steps"][1]["note"]
+    assert "fix loop" not in note
+    assert "background_work_lost" in note

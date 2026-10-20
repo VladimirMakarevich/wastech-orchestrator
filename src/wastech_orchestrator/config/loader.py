@@ -481,6 +481,7 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "extra_args",
             "max_turns",
             "max_turns_gate",
+            "background_tasks",
             "reasoning",
             "primary",
         },
@@ -516,7 +517,18 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
         max_turns_gate=_bool(m, "max_turns_gate", False, where, issues),
+        background_tasks=_background_tasks(m, pid, where, issues),
     )
+
+
+def _background_tasks(m: Mapping[str, Any], pid: ProviderId, where: str, issues: list[str]) -> bool:
+    """``background_tasks`` is a Claude Code switch; on another provider it would do nothing."""
+    value = _bool(m, "background_tasks", False, where, issues)
+    if "background_tasks" in m and pid is not ProviderId.CLAUDE:
+        issues.append(
+            f"{where}.background_tasks: only the claude provider has background tasks; delete it"
+        )
+    return value
 
 
 def _build_providers(raw: Any, issues: list[str]) -> dict[ProviderId, ProviderConfig]:
