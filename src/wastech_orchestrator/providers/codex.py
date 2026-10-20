@@ -895,6 +895,10 @@ class CodexProvider(BaseCliProvider):
             # the whole reason this check is not skippable there.
             strict_isolation=self._security.strict_isolation,
             runner=self._canary_runner,
+            # The deny entries a real attempt adds — env-file, runs home, the operator's blacklist —
+            # so the smoke proves the profile that will launch, not a smaller one.
+            attempt_deny=self._deny_policy,
+            denied_read_paths=self._security.denied_read_paths,
         )
         return IsolationCapabilityReport(
             ok=report.ok,

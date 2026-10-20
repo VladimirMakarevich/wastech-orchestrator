@@ -112,6 +112,14 @@ class LedgerRecord:
     # both harmlessly.
     recovered_from_stuck: bool = False
     recovered_loop: str | None = None
+    # Where and why a run that did NOT finish stopped: the node, the fix loop, and the limit that
+    # was reached (``max_fix_cycles``, ``repeated_findings``, …), from its failure report. The run's
+    # step record carries what each node did but not that the run stopped between two of them —
+    # so a rework verdict followed by the same evaluator again, after an operator's `rerun
+    # --continue`, read as "the fix step was not recorded". Old records omit all three harmlessly.
+    stop_node: str | None = None
+    stuck_loop: str | None = None
+    stuck_limit: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -139,6 +147,9 @@ class LedgerRecord:
             "advanced_mode": self.advanced_mode,
             "recovered_from_stuck": self.recovered_from_stuck,
             "recovered_loop": self.recovered_loop,
+            "stop_node": self.stop_node,
+            "stuck_loop": self.stuck_loop,
+            "stuck_limit": self.stuck_limit,
         }
 
 

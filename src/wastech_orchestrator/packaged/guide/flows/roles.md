@@ -37,7 +37,7 @@ An `evaluator` node's `role` field selects its lens. Four built-ins ship; any ot
 | `verifier` | Fact/finding verification (often `blocking: false`). | Research fact-checks, security-finding verification. |
 | `test_quality` | Judges the _quality_ of tests, not just pass/fail (often non-blocking with a `max_rework_per_stage`). | Test-adequacy gates. |
 
-A non-blocking evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget is spent with a finding still open it accepts and the flow continues. That "moved on" is not silent — the orchestrator logs a console warning and (when `telegram.trace` is on) pushes a ⚠️ trace so you know that stage may still need follow-up. See the `max_rework_per_stage` row in [reference.md](reference.md).
+A non-blocking evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget — or the budget of the fix loop its `rework` edge charges, whichever runs out first — is spent with a finding still open, it accepts and the flow continues. That "moved on" is not silent — the orchestrator logs a console warning naming the limit and (when `telegram.trace` is on) pushes a ⚠️ trace so you know that stage may still need follow-up. See the `max_rework_per_stage` row in [reference.md](reference.md).
 
 `role` is an audit/behavior discriminator, not a permission — every evaluator is forced `read-only` and can never use `editing_lineage` (see [reference.md](reference.md)).
 
@@ -69,6 +69,23 @@ A node that writes a document — a report, a translated chapter, a generated sp
 ```
 
 One portable filename (no `/`, no `..`), resolved inside the flow's `output_policy` report directory — the only place the node may write anyway — or the repository root for a policy without one. **In the prompt, name that directory as `{report_dir}`, never as a literal path**: the report policies resolve it from the flow (`report_dir:` moves the base), so a prompt carrying `docs/research/<task_id>/` keeps sending the agent to the old directory after an operator moves it, and the after-stage guard hard-stops the task on the first write. The packaged `deep_research/synthesis.md` is the worked example. It is mutually exclusive with `output_artifact` (a slot node's channel is its slot). Two things to write into the prompt when you use it: the file has to **stand alone**, since no closing message travels with it, and the filename in the prompt has to match the one in the flow. If the file never appears the channel falls back to the message and the run logs a warning — never a silent empty handoff.
+
+## What a node is handed about the change
+
+From the first `workspace-write` edit on, the context footer of every agent and evaluator node carries three things about the task's change, and a prompt does not have to name any of them:
+
+- `change overview` — a page that maps the change: every changed path with how it changed (`A`, `M`, `D`, `R old → new`) and its line counts, the totals and the size of the full diff. It stays bounded however large the change is, and a path `security.denied_read_paths` covers is listed by name only, marked `[denied]`.
+- `diff` — the full redacted diff, the whole change since the task's base.
+- `Change base: <sha>` — the full SHA of the commit the change is measured from.
+
+The footer closes with one **where-to-start sentence** the orchestrator writes for the node. It depends on whether the node can run commands on **every** provider its route may land on — Codex runs commands on any profile, Claude in advanced mode or with the git-evidence grant, and Claude on native Windows under strict isolation does not — and anything the orchestrator cannot establish counts as no shell. A node with a shell is told to start from the overview, read added files directly, inspect any other file with `git diff <base> -- <path>`, read the full diff only if it needs all of it, and leave `[denied]` paths alone. Any other node is told to read the full diff, with the overview as its map. Inside a decomposed run the sentence also names the overview's second section, "Change since the orchestrator's last commit", as the subtask's own change. An attempt that falls back to another provider after an infrastructure failure that left the tree changed is handed only that partial diff — the overview, the base and the sentence describe a different change, so it gets none of them.
+
+What that means for a prompt you write:
+
+- **A role that judges what changed** (a code review) needs to say nothing about where to start; the sentence already sends it to the right place. Do not tell it to read the whole diff first — that undoes the point for a node that can open only what it needs.
+- **A role that must read the whole change regardless** — a critic judging a revision as a whole, the before against the after — says so explicitly and names `{diff_path}`, otherwise the sentence steers a node with a shell to the overview. The packaged content critics (`tone_style`, `story_critic`, `en_critic`) do this.
+- **A role that fixes findings** starts from the findings and the check log, not from the change; the overview is how it locates the files they name. The packaged `fixing` prompts are written that way.
+- To say something specific about the overview or the base, name `{change_overview_path}` and `{diff_base}` inside `{?change_overview_path}…{/change_overview_path}` (see [prompt-variables.md](prompt-variables.md)).
 
 ## When a node re-enters a live session (`resume_role_file`)
 

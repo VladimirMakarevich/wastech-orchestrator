@@ -25,7 +25,7 @@ from wastech_orchestrator.providers import claude, codex
 from wastech_orchestrator.providers.base import AgentProvider, ProviderId
 from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
-from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout, anchored
 from wastech_orchestrator.security.isolation import HostFloorCheck, IsolationCheck
 from wastech_orchestrator.security.shell_reach import ShellCheck
 from wastech_orchestrator.state_store import StateStore
@@ -80,7 +80,12 @@ def build_internal_deny_policy(
     return InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
-        env_file=env_file,
+        # Rooted, always: the adapters project these into sandbox policy, and Codex refuses a
+        # relative filesystem key outright ("must be absolute") — so `--config .worc/config.yaml`,
+        # which derives the env-file as `.worc/.env`, failed every Codex attempt in one second and
+        # fell back to the other provider. Resolved against this process's working directory,
+        # which is what the relative path meant when the operator typed it.
+        env_file=anchored(env_file) if env_file is not None else None,
         runs_home=layout.runs_home,
     )
 

@@ -292,6 +292,8 @@ def test_tool_stdin_has_no_secrets_or_full_env(tmp_path: Path) -> None:
         "task_path",
         "plan_path",
         "diff_path",
+        "change_overview_path",
+        "diff_base",
         "checks_path",
         "review_path",
         "conflicts_path",

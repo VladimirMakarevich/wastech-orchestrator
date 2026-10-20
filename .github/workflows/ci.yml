@@ -44,9 +44,9 @@ jobs:
     name: static gates (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
@@ -82,10 +82,10 @@ jobs:
     name: markdown gate (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The linter requires >= 24.17.0 (all three @wastech-mdlint packages declare it).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
@@ -93,7 +93,7 @@ jobs:
 
       # tools/mdlint.py is a stdlib-only script, so the project itself is never installed here — this
       # step only guarantees that `python` resolves, which is not true of a bare Ubuntu runner.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -124,9 +124,9 @@ jobs:
           - { os: macos-latest, python-version: "3.13" }
           - { os: windows-latest, python-version: "3.13" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip

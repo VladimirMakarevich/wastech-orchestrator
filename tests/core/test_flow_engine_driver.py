@@ -19,7 +19,7 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.validator import validate_flow
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import PushOutcome
+from wastech_orchestrator.git_manager import CurrentDiff, PushOutcome
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
@@ -64,6 +64,15 @@ class _FakeRouter:
         # (Codex ``read-only``) or a host where it was dropped.
         override = getattr(self, "grants_shell", None)
         return git_evidence if override is None else bool(override)
+
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # Every route this double resolves has one provider, so "every provider on it" and "any
+        # provider on it" are the same question.
+        return self.route_grants_shell(
+            route, permission_profile=permission_profile, git_evidence=git_evidence
+        )
 
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         self.route_overrides[node_id] = override
@@ -151,8 +160,12 @@ class _FakeGit:
     ) -> str | None:
         return "https://example/pr/1"
 
-    def write_current_diff(self, task_id: str) -> str:
-        return "/art/current.diff"
+    def write_current_diff(self, task_id: str) -> CurrentDiff:
+        return CurrentDiff(
+            diff_path="/art/current.diff",
+            overview_path="/art/change-overview.txt",
+            base_sha="0" * 40,
+        )
 
     def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         return ()

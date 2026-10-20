@@ -17,10 +17,12 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.loop_control import (
     ExhaustedLoop,
     LoopCounters,
+    ReworkRefusal,
     exhausted_fix_loops,
     global_backstop_exhausted,
     global_cap,
     loop_cap,
+    rework_refusal,
 )
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -108,8 +110,8 @@ def test_exhausted_fix_loops_empty_when_under_cap() -> None:
 
 
 def test_exhausted_fix_loops_boundary_counter_equal_cap() -> None:
-    """counter == cap is already exhausted (the engine bumps then compares >=, so a park always
-    persists the counter already at the cap value)."""
+    """counter == cap is already exhausted (a budget of N is N fix rounds: after N charged rounds
+    the counter holds N and the next one is refused, so a park persists the counter at the cap)."""
     snapshot = _review_fix_flow()
     result = exhausted_fix_loops(snapshot, {"review_fix": 15}, max_fix_cycles=99, start="review")
     assert result == [ExhaustedLoop(loop="review_fix", node="review", counter=15, cap=15)]
@@ -148,22 +150,81 @@ def test_global_backstop_exhausted_boundary() -> None:
 # -- engine delegation regression -----------------------------------------------------------
 
 
-def test_engine_loop_cap_delegates_to_loop_control() -> None:
+def _refusal(
+    snapshot: FlowSnapshot, counters: dict[str, int], edge: Edge, *, max_fix_cycles: int = 99
+) -> ReworkRefusal | None:
+    return rework_refusal(
+        snapshot,
+        FlowRunState(flow_fingerprint="fp", loop_counters=counters),
+        edge,
+        max_fix_cycles=max_fix_cycles,
+        max_total_fix_iterations=99,
+    )
+
+
+def test_a_named_loop_budget_of_n_allows_n_fix_rounds() -> None:
+    # `budgets: {review_fix: 2}` is two fix rounds: the edge is free while the loop holds 0 or 1
+    # charged rounds and refused only once it holds 2. It used to be refused at the second rework
+    # verdict, so a budget of 2 bought a single round — unlike an inline `budget: 2`.
+    snapshot = _review_fix_flow(budgets={"review_fix": 2})
+    edge = snapshot.adjacency["review"][0]
+    assert _refusal(snapshot, {}, edge) is None
+    assert _refusal(snapshot, {"review_fix": 1}, edge) is None
+    assert _refusal(snapshot, {"review_fix": 2}, edge) == ReworkRefusal(
+        loop="review_fix", limit_name="max_fix_cycles"
+    )
+
+
+def test_rework_refusal_clamps_the_loop_to_the_config_ceiling() -> None:
+    snapshot = _review_fix_flow(budgets={"review_fix": 9})
+    edge = snapshot.adjacency["review"][0]
+    assert _refusal(snapshot, {"review_fix": 3}, edge, max_fix_cycles=3) is not None
+
+
+def test_rework_refusal_reads_an_inline_budget_the_same_way() -> None:
+    nodes: list[FlowNode] = [_agent("a"), _evaluator("ev")]
+    edges = [
+        Edge(from_node="a", to="ev", outcome="done"),
+        Edge(from_node="ev", to="a", outcome="rework", budget=2),
+    ]
+    snapshot = _snapshot(nodes, edges)
+    edge = edges[1]
+    assert _refusal(snapshot, {"ev->a:rework": 1}, edge) is None
+    refused = _refusal(snapshot, {"ev->a:rework": 2}, edge)
+    assert refused is not None and refused.limit_name == "budget:ev->a"
+
+
+def test_rework_refusal_reports_the_global_backstop() -> None:
+    snapshot = _review_fix_flow(budgets={"review_fix": 9, "global_fix_iterations": 4})
+    edge = snapshot.adjacency["review"][0]
+    refused = _refusal(snapshot, {"review_fix": 1, "global_fix_iterations": 4}, edge)
+    assert refused == ReworkRefusal(loop="review_fix", limit_name="max_total_fix_iterations")
+
+
+def test_engine_charges_through_the_shared_refusal_check() -> None:
+    # The engine and the pre-run hint a non-blocking evaluator receives must read one function, so
+    # the evaluator can never accept on a limit the engine would not have enforced, or vice versa.
     snapshot = _review_fix_flow(budgets={"review_fix": 5, "global_fix_iterations": 20})
     agents = _agents(max_fix_cycles=99, max_total=99)
+    run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
     engine = FlowEngine(
         snapshot,
-        FlowRunState(flow_fingerprint=snapshot.flow_fingerprint),
+        run_state,
         {"agent": None, "evaluator": None},  # type: ignore[dict-item]
         recorder=None,  # type: ignore[arg-type]
         facts=lambda _fact: False,
         agents=agents,
         task_id="task-1",
     )
-    assert engine._loop_cap("review_fix") == loop_cap(
-        snapshot.doc.budgets, agents.max_fix_cycles, "review_fix"
-    )
-    assert engine._global_cap() == global_cap(snapshot.doc.budgets, agents.max_total_fix_iterations)
+    edge = snapshot.adjacency["review"][0]
+    for _ in range(5):
+        assert engine._charge_rework(edge) is None
+    assert run_state.counter("review_fix") == 5
+    stuck = engine._charge_rework(edge)
+    assert stuck is not None and stuck.limit_name == "max_fix_cycles"
+    # A refused round charges nothing: the counters still say five rounds ran.
+    assert run_state.counter("review_fix") == 5
+    assert run_state.fix_iterations == 5
 
 
 # -- operator-facing mirror -----------------------------------------------------------------

@@ -623,3 +623,19 @@ def test_effective_prompt_carries_the_required_skills_block(
     # syntax, and the shipped docs say guaranteed invocation is Claude-only today.
     prompt = build_effective_prompt(make_request(prompt="ROLE", required_skills=("acme-tdd",)))
     assert "- /acme-tdd" in prompt and "the instructions above win" in prompt
+
+
+def test_the_change_hand_off_adds_no_argv(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The overview, its base and the guidance travel in the stdin prompt only: the flag ceiling,
+    # the tool set and the sandbox see the same request either way.
+    handed = make_request(
+        diff_path="/x/current.diff",
+        change_overview_path="/x/change-overview.txt",
+        diff_base="b" * 40,
+        change_guidance="Start from the change overview.",
+    )
+    assert _argv(codex_config, handed) == _argv(
+        codex_config, make_request(diff_path="/x/current.diff")
+    )

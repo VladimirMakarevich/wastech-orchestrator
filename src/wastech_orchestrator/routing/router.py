@@ -50,6 +50,7 @@ from wastech_orchestrator.security.shell_reach import (
     ShellCheck,
     ShellQuery,
     any_provider_grants_shell,
+    every_provider_grants_shell,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -154,6 +155,11 @@ class ResolvedRoute:
     source: RouteSource
 
 
+def _route_providers(route: ResolvedRoute) -> list[ProviderId]:
+    """Every provider an attempt on *route* may land on: the primary, then the fallback if any."""
+    return [route.primary] if route.fallback is None else [route.primary, route.fallback]
+
+
 @dataclass(frozen=True)
 class ProviderAttempt:
     """One provider invocation within a stage (a provider_attempts audit row)."""
@@ -254,18 +260,36 @@ class AgentRouter:
         through the injected table (see
         :mod:`wastech_orchestrator.security.shell_reach`).
         """
-        providers = [route.primary]
-        if route.fallback is not None:
-            providers.append(route.fallback)
         return any_provider_grants_shell(
-            providers,
+            _route_providers(route),
             self._config.agents.providers,
             self._shell_checks,
-            ShellQuery(
-                permission_profile=permission_profile,
-                git_evidence=git_evidence,
-                strict_isolation=self._config.security.strict_isolation,
-            ),
+            self._shell_query(permission_profile=permission_profile, git_evidence=git_evidence),
+        )
+
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool:
+        """Whether this attempt gets a shell on **every** provider it may land on (offline).
+
+        The question a node's instructions are chosen by: a node may be told to inspect the change
+        with commands only when whichever end of the route serves it can run them, because the
+        instruction is written once per request and a fallback attempt reuses it. Unknown counts as
+        no shell here — the opposite of :meth:`route_grants_shell`, which guards detection and so
+        fails toward watching (see :mod:`wastech_orchestrator.security.shell_reach`).
+        """
+        return every_provider_grants_shell(
+            _route_providers(route),
+            self._config.agents.providers,
+            self._shell_checks,
+            self._shell_query(permission_profile=permission_profile, git_evidence=git_evidence),
+        )
+
+    def _shell_query(self, *, permission_profile: str | None, git_evidence: bool) -> ShellQuery:
+        return ShellQuery(
+            permission_profile=permission_profile,
+            git_evidence=git_evidence,
+            strict_isolation=self._config.security.strict_isolation,
         )
 
     def resolve_route(
@@ -536,12 +560,16 @@ class AgentRouter:
                         },
                     )
                     break  # non-fallback infra error → terminal for this stage
-                log.info(
+                # A pinned provider is a decision the flow made on purpose (a second model as a
+                # cross-check); losing it is worth a warning, not a debug-level breadcrumb.
+                log_fallback = log.warning if route.source is RouteSource.FLOW_NODE else log.info
+                log_fallback(
                     "falling back",
                     extra={
                         "from": pid.value,
                         "to": next_pid.value,
                         "error_class": exc.error_class.value,
+                        "route_source": route.source.value,
                     },
                 )
                 if snapshot is not None and before is not None:
@@ -692,8 +720,9 @@ class AgentRouter:
         from_provider: ProviderId | None = None,
         to_provider: ProviderId | None = None,
     ) -> AgentRunRequest:
-        """Per-attempt request. The fallback gets the partial diff; the permission profile is never
-        relaxed (``permission_profile`` is intentionally left untouched).
+        """Per-attempt request. The fallback gets the partial diff, without the change overview, its
+        base or the guidance that describe the full one; the permission profile is never relaxed
+        (``permission_profile`` is intentionally left untouched).
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
         provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
@@ -707,7 +736,15 @@ class AgentRouter:
         """
         req = replace(request, attempt=attempt)
         if partial is not None:
-            req = replace(req, diff_path=partial.diff_path)
+            # The overview, its base and the sentence pointing at them describe the change Core
+            # wrote, not this partial one; an attempt handed the partial diff gets it alone.
+            req = replace(
+                req,
+                diff_path=partial.diff_path,
+                change_overview_path=None,
+                diff_base=None,
+                change_guidance=None,
+            )
         if from_provider is not None and to_provider is not None and from_provider != to_provider:
             req = replace(
                 req,

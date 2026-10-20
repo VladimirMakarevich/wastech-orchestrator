@@ -63,10 +63,15 @@ def test_documentation_role_prompt_only_interpolates_allowed_vars() -> None:
     from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
 
     template = (_PACKAGED / "implementation" / "documentation.md").read_text(encoding="utf-8")
-    rendered = render_prompt(template, {"plan_path": "/p", "diff_path": "/d"})
+    # After an edit the diff, its overview and its base are always set together.
+    rendered = render_prompt(
+        template,
+        {"plan_path": "/p", "diff_path": "/d", "change_overview_path": "/o", "diff_base": "b" * 40},
+    )
     # The plan/diff path tokens are substituted; no unresolved allowlisted token leaks through.
     assert "{plan_path}" not in rendered and "/p" in rendered
     assert "{diff_path}" not in rendered and "/d" in rendered
+    assert "{change_overview_path}" not in rendered and "/o" in rendered
     assert not any(f"{{{name}}}" in rendered for name in ALLOWED_PROMPT_VARS)
 
 
