@@ -17,6 +17,12 @@ from wastech_orchestrator.core.orchestrator import (
     PipelineResult,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.diff_overview import (
+    TASK_BASE_TITLE,
+    OverviewSection,
+    parse_diff,
+    render_overview,
+)
 from wastech_orchestrator.git_manager import KIND_PR
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.observability import logging as obslog
@@ -621,6 +627,65 @@ def test_cmd_run_happy_path(
         "terminal cleanup started",
         "terminal cleanup completed",
     } <= messages
+
+
+def test_cmd_run_hands_the_review_the_change_overview_and_its_base(
+    git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # End to end over the fake CLIs: once `implementation` has edited the clone, the `review` node's
+    # recorded request carries the overview path and the base beside the diff, and its prompt — as
+    # piped to the CLI and as kept in the rendered-prompt record — closes with the base and one
+    # where-to-start sentence.
+    project = tmp_path / "project"
+    project.mkdir()
+    claude_cmd = fake_cli("success_edit", "claude")
+    codex_cmd = fake_cli("success_edit", "codex")
+    config = _write_cli_config(project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd)
+    task_file = project / "task-101.md"
+    _complete_task_file(task_file, "task-101")
+    base = git_run(["rev-parse", "main"], git_repo.clone)
+
+    assert (
+        cli.main(["--config", str(config), "--heartbeat-seconds", "0", "run", str(task_file)]) == 0
+    )
+
+    logs = git_repo.clone / ".worc" / "logs" / "task-101"
+    overview = (logs / "change-overview.txt").read_text(encoding="utf-8")
+    assert overview.startswith(f"{TASK_BASE_TITLE} {base} — ")
+    assert "A  agent_change.py  +2  −0" in overview
+    requests = sorted((logs / "stages" / "review").glob("run-*/*/request.json"))
+    assert requests, "the review node recorded no request"
+    recorded = json.loads(requests[0].read_text(encoding="utf-8"))
+    context = recorded["context_paths"]
+    assert Path(context["change_overview_path"]).name == "change-overview.txt"
+    assert Path(context["change_overview_path"]).parent == Path(context["diff_path"]).parent
+    assert context["diff_base"] == base
+    prompt = recorded["prompt"]
+    assert prompt.index("- change overview:") < prompt.index("- diff:")
+    last = prompt.splitlines()[-1]
+    assert last.startswith(("Start from the change overview", "Read the full diff"))
+    assert prompt.splitlines()[-2] == f"Change base: {base}"
+    rendered = (requests[0].parent.parent / "rendered-prompt.md").read_text(encoding="utf-8")
+    assert f"Change base: {base}" in rendered and last in rendered
+
+
+def test_the_overview_of_a_large_change_stays_small() -> None:
+    # A change the size of the largest one measured in practice (about 1.1 MB of diff across
+    # 3000 files) still hands a node a page, not a second copy of the diff.
+    blocks = []
+    for i in range(3000):
+        body = "".join(f"+line {n} of a fairly ordinary source file\n" for n in range(9))
+        blocks.append(
+            f"diff --git a/src/pkg/module_{i:04}.py b/src/pkg/module_{i:04}.py\n"
+            f"index 1111111..2222222 100644\n--- a/src/pkg/module_{i:04}.py\n"
+            f"+++ b/src/pkg/module_{i:04}.py\n@@ -1 +1,10 @@\n keep\n{body}"
+        )
+    diff = "".join(blocks)
+    assert len(diff.encode()) > 1_100_000
+    section = OverviewSection(TASK_BASE_TITLE, "e" * 40, parse_diff(diff))
+    rendered = render_overview([section], diff_size=len(diff.encode())).encode("utf-8")
+    assert len(rendered) < 20 * 1024
+    assert rendered.endswith(b"(+25200 \xe2\x88\x920) not listed\n")
 
 
 def test_in_repo_commit_stores_task_and_summary_not_logs(

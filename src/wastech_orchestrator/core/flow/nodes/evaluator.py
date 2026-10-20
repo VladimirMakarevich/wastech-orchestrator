@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from wastech_orchestrator.core.flow.change_guidance import change_guidance_for
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -486,6 +487,8 @@ class EvaluatorNodeRunner:
             task_path=self._in.task_path,
             plan_path=self._in.plan_path,
             diff_path=self._in.diff_path,
+            change_overview_path=self._in.change_overview_path,
+            diff_base=self._in.diff_base,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             conflicts_path=self._in.conflicts_path,
@@ -520,6 +523,22 @@ class EvaluatorNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+            change_guidance=change_guidance_for(
+                self._in, ctx, always_has_shell=lambda: self._always_has_shell(node, route)
+            ),
+        )
+
+    def _always_has_shell(self, node: EvaluatorNode, route: ResolvedRoute) -> bool:
+        """True iff this evaluator attempt gets a shell on **every** provider its route may reach.
+
+        The opposite default to :meth:`_attempt_has_shell`, which guards detection: a reviewer is
+        sent to inspect files with commands only when it is sure to be able to, and otherwise to
+        the full diff.
+        """
+        return self._s.router.route_always_grants_shell(
+            route,
+            permission_profile=node.permission_profile.value,
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
         )
 
     def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:

@@ -409,6 +409,25 @@ def test_paths_contained_covers_the_supervisor_packet(tmp_path: Path) -> None:
         assert_orchestration_paths_contained(private, exchange_root)
 
 
+def test_paths_contained_covers_the_change_overview(tmp_path: Path) -> None:
+    # The overview is a context field like the diff it summarizes: a private path in it fails
+    # closed rather than reaching the provider.
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
+    td = exchange_task_dir(exchange_root, "t")
+    contained = _request(
+        exchange_root, tmp_path / "repo", change_overview_path=str(td / "change-overview.txt")
+    )
+    assert_orchestration_paths_contained(contained, exchange_root)  # does not raise
+
+    private = _request(
+        exchange_root,
+        tmp_path / "repo",
+        change_overview_path=str(tmp_path / ".worc" / "logs" / "t" / "change-overview.txt"),
+    )
+    with pytest.raises(ExchangeError):
+        assert_orchestration_paths_contained(private, exchange_root)
+
+
 def test_paths_contained_covers_the_conflict_report(tmp_path: Path) -> None:
     # Same anti-drift argument as the supervisor packet: the merge flow's conflict inventory is a
     # context field, so an unchecked one would hand a provider a private `.worc/logs/...` path.

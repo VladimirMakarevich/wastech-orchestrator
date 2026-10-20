@@ -169,6 +169,7 @@ from wastech_orchestrator.core.summary_report import (
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.core.supervisor_packet import build_packet_facts
 from wastech_orchestrator.core.supervisor_usage import summarize_spend, summarize_task_spend
+from wastech_orchestrator.diff_overview import CHANGE_OVERVIEW_FILENAME, overview_base
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
     ConflictedPath,
@@ -2580,6 +2581,19 @@ class Orchestrator:
                 str(diff),
                 extra_secrets=secrets,
             )
+        # The overview and its base come back from the file the run wrote, not from the tree: a
+        # resumed node is handed the change a fresh run would have handed it, even if the clone
+        # moved while the task was stopped.
+        overview = task_dir / CHANGE_OVERVIEW_FILENAME
+        if overview.exists():
+            inputs.change_overview_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                CHANGE_OVERVIEW_FILENAME,
+                str(overview),
+                extra_secrets=secrets,
+            )
+            inputs.diff_base = overview_base(overview.read_bytes().decode("utf-8", "replace"))
         plan = task_dir / "plan.md"
         if plan.exists():
             inputs.plan_path = publish_file(

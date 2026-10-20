@@ -73,6 +73,8 @@ def test_allowlist_matches_documented_variables() -> None:
         "task_path",
         "plan_path",
         "diff_path",
+        "change_overview_path",  # the bounded overview beside the diff (empty before an edit)
+        "diff_base",  # the full SHA the change is measured from (empty before an edit)
         "checks_path",
         "review_path",
         "subtask_order",

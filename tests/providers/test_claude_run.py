@@ -420,6 +420,44 @@ def test_request_json_prompt_includes_context_footer(
     assert request_json["prompt"] == fake.captured["stdin_text"]
 
 
+def test_request_json_records_the_change_overview_and_its_base(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A post-mortem has to be able to tell what each node was handed about the change: the
+    # overview path and the base sit with the other context paths, and only when they were set.
+    sha = "a" * 40
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    provider.run(
+        make_request(
+            diff_path="/t/current.diff",
+            change_overview_path="/t/change-overview.txt",
+            diff_base=sha,
+            change_guidance="Read the full diff.",
+        )
+    )
+    recorded = json.loads((_attempt_dir(tmp_path) / "request.json").read_text())
+    assert recorded["context_paths"]["change_overview_path"] == "/t/change-overview.txt"
+    assert recorded["context_paths"]["diff_base"] == sha
+    assert f"Change base: {sha}\nRead the full diff." in recorded["prompt"]
+
+
+def test_request_json_omits_the_change_overview_when_none_was_handed(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    provider.run(make_request(diff_path="/t/current.diff"))
+    context = json.loads((_attempt_dir(tmp_path) / "request.json").read_text())["context_paths"]
+    assert "change_overview_path" not in context and "diff_base" not in context
+
+
 def test_denied_commands_reach_argv_as_disallowed_tools(
     claude_config: ProviderConfig,
     security_config: SecurityConfig,

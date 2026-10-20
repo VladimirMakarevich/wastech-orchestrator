@@ -1,16 +1,16 @@
-Review the current diff against the task{?plan_path} and plan{/plan_path}. Report each finding with a severity, and mark anything that must change before merge as **blocking**. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk — do not over-block on nits.
+Review this task's change against the task{?plan_path} and plan{/plan_path}.{?change_overview_path} Start from the change overview and account for every path it lists.{/change_overview_path} Report each finding with a severity, and mark anything that must change before merge as **blocking**. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk — do not over-block on nits.
 
 When a `prior_fix` context file is present, this is a re-review after a fix attempt — read it first. It is the implementer's own account of what they changed and what they could not, so you judge "was my finding addressed" against their reasoning, not the diff alone. If it reports an **unresolvable environmental blocker** (a sandbox or permission wall, a missing host toolchain — something no code change can fix), do not re-issue the same finding as if the code were merely wrong: say plainly in that finding that the change is blocked on a human, rather than sending an unchanged diff back for another round.
 
 ## Output
 
-Your findings are consumed by a downstream LLM agent that will do the rework, not by a human reading a report. Optimize for that:
+Your findings are read by the LLM agent that does the rework, not by a human. Optimize for that:
 
-- Keep it clear, short, and structured. No preamble, no summary of the diff, no praise or filler — only findings.
-- Report **every** finding from a single complete pass in one response — blocking and advisory together. Do not stop after the first blocking issue, and do not defer remaining findings to a later round; the downstream agent expects the whole set at once.
+- Clear, short, structured: no preamble, no summary of the diff, no praise or filler — only findings.
+- Report **every** finding from one complete pass, in one response — blocking and advisory together. Do not stop at the first blocking issue or defer any finding to a later round.
 - One entry per finding, ordered blocking-first. Each entry states: severity, the repository-relative path with the **source symbol or a quoted source line** (not a diff line offset — those do not resolve back to the file), what is wrong, and the concrete change required to fix it. A finding that cites a document quotes the sentence and names the file it is in, so its claim is checked where it was read. Never invent a path to satisfy those: if what you must report is that you could **not** review the change (a context file you could not open, a command that would not run), say so in the finding's own text in those words rather than as a defect in the diff — no fix step can act on it.
-- Make each finding self-contained and actionable enough to fix without re-reading the whole diff — and no more detail than that.
-- One finding per issue; do not repeat the same point across entries.
+- Make each finding self-contained: fixable without re-reading the whole diff, and no longer than that.
+- One finding per issue; never repeat a point across entries.
 - No findings means the diff is clean — return an empty `findings` array, not prose.
 - The diff may be cumulative — on a shared branch it can include files committed by earlier tasks. Judge only what this task's plan changed; do not flag prior-task code as scope drift. Documentation, changelog, and status-doc updates run in a later step of this flow, so do not flag those as missing — unless the diff is **only** documentation, which makes it this task's deliverable and its gaps the review.
 
@@ -18,7 +18,7 @@ Your findings are consumed by a downstream LLM agent that will do the rework, no
 
 - Confirm the change actually satisfies the task's business requirements{?plan_path} and the plan's acceptance criteria{/plan_path} — not just that it compiles.
 - Check the edges the task implies: empty input, missing/duplicate/circular data, unusual paths, and error handling.
-- When the diff is an authoring/documentation deliverable (a skill/agent doc, README, or doc asserting facts about this product), enumerate every product-surface reference it makes — each command, flag, option value, output field, public API — and verify each against current source in this one pass, so the whole set of doc-vs-product drift surfaces now rather than one instance per later round.
+- When the diff is an authoring/documentation deliverable (a skill/agent doc, README, or doc asserting facts about this product), enumerate every product-surface reference it makes — each command, flag, option value, output field, public API — and verify each against current source in this one pass, so all such drift surfaces now, not one instance per round.
 - If the project maintains its own specs, requirements, or design-decision docs, confirm behavior matches them and flag any silent divergence.
 - **The check gate is not yours to run.** A Check Runner outside your sandbox runs the repository's configured checks and its exit codes are the verdict{?checks_path}; the per-command results are at `{checks_path}` — read them, and treat a `skipped` check as "did not run", never as a pass{/checks_path}. Do not run the build or test suite yourself and do not file a finding from having done so: your sandbox is not the gate's environment, so a failure there is evidence about the sandbox.
 
@@ -55,4 +55,4 @@ A brief of repository memory relevant to this task — recurring reviewer expect
 
 ## Subtask Scope
 
-You are reviewing **subtask {subtask_order} of {subtask_count}**, not the whole task. Its immutable spec is at {subtask_spec_path}: judge the diff against **its** acceptance criteria and **its** out-of-scope boundary. Work belonging to a later subtask is not missing from this one — do not raise it at any severity, and a change its spec forbids is a finding rather than something to ask for.{/subtask_spec_path}
+You are reviewing **subtask {subtask_order} of {subtask_count}**, not the whole task. Its immutable spec is at {subtask_spec_path}: judge the diff against **its** acceptance criteria and **its** out-of-scope boundary. Work belonging to a later subtask is not missing from this one — do not raise it at any severity, and a change its spec forbids is a finding rather than something to ask for. Its change is the overview's since-last-commit section, if any, else the whole overview.{/subtask_spec_path}

@@ -213,6 +213,14 @@ class AgentRunRequest:
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
+    # The change overview published beside the diff — every changed path with its kind and line
+    # counts, bounded however large the change — and the full SHA the change is measured from, so a
+    # node can decide what to open, and inspect it over exactly the core's scope, before reading
+    # the whole diff. Set together with ``diff_path`` once an editing node has run, and cleared
+    # together with ``change_guidance`` on an attempt handed a partial diff the overview does not
+    # describe. ``diff_base`` is metadata, not content: the commit is already in the repository.
+    change_overview_path: str | None = None
+    diff_base: str | None = None
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
@@ -291,6 +299,12 @@ class AgentRunRequest:
     # session, never on one resuming a live one, where the contract is already in the conversation.
     # ``None`` prepends nothing. Secret-free by contract.
     security_preamble: str | None = None
+    # The Core-built sentence telling the node where to start on the change: from the overview,
+    # inspecting files against ``diff_base``, when every provider on its route grants a shell; from
+    # the full diff, with the overview as its map, otherwise. Carried here because a role prompt
+    # cannot branch on capability; the footer renders it last. Secret-free by contract, names only
+    # ``git`` verbs, and ``None`` adds nothing.
+    change_guidance: str | None = None
     # The target repository's own harness skills this node must invoke, resolved from the flow
     # node's ``skills:``. Names only — the CLI does its own discovery, so nothing here is a path, a
     # body, or an inventory. Carried through the single neutral seam as a Core-built prompt block,
@@ -309,10 +323,16 @@ class AgentRunRequest:
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
-    """Render the non-``None`` context file paths as a deterministic footer (paths only)."""
+    """Render the non-``None`` context file paths as a deterministic footer (paths only).
+
+    The change overview is listed immediately before the diff it summarizes, and the change's base
+    and the where-to-start sentence close the footer, after the paths they refer to. A request that
+    sets none of the three renders exactly the footer it would without them.
+    """
     fields = (
         ("task", request.task_path),
         ("plan", request.plan_path),
+        ("change overview", request.change_overview_path),
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
@@ -322,10 +342,17 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("packet", request.supervisor_packet_path),
     )
     present = [(label, path) for label, path in fields if path]
-    if not present:
-        return ""
-    lines = ["Context files (read them as needed; do not assume their contents):"]
-    lines += [f"- {label}: {path}" for label, path in present]
+    lines: list[str] = []
+    if present:
+        lines.append("Context files (read them as needed; do not assume their contents):")
+        lines += [f"- {label}: {path}" for label, path in present]
+    change: list[str] = []
+    if request.diff_base:
+        change.append(f"Change base: {request.diff_base}")
+    if request.change_guidance:
+        change.append(request.change_guidance)
+    if change:
+        lines += ["", *change] if lines else change
     return "\n".join(lines)
 
 

@@ -27,6 +27,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.git_manager import (
     ChangedPath,
+    CurrentDiff,
     GitControlDrift,
     GitControlState,
     PushOutcome,
@@ -160,11 +161,19 @@ class RouterPort(Protocol):
     per-attempt fact the Git-control detection brackets key on. It belongs to the Router because
     only the adapters can answer it (and both ends of a route must be asked), and to this protocol
     because a runner must be able to ask before it builds a request.
+
+    ``route_always_grants_shell`` is the opposite question with the opposite default — whether
+    *every* provider on the route gives the attempt a shell, unknown counting as no — and decides
+    whether a node may be told to inspect the change with commands.
     """
 
     def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
 
     def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool: ...
+
+    def route_always_grants_shell(
         self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
     ) -> bool: ...
 
@@ -371,7 +380,9 @@ class GitPort(Protocol):
         references_block: str | None = None,
     ) -> str | None: ...
 
-    def write_current_diff(self, task_id: str) -> str: ...
+    #: The task's full diff and its bounded overview, written together from one snapshot, plus the
+    #: full SHA both are measured from.
+    def write_current_diff(self, task_id: str) -> CurrentDiff: ...
 
     #: The task's change — committed or not — measured from the gate's reference point, not from
     #: ``HEAD``: a commit made inside the task must not be able to empty the dangerous-diff gate.
@@ -478,6 +489,11 @@ class NodeInputs:
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
+    #: the exchange copy of the change overview written with ``diff_path``, and the full SHA the
+    #: change is measured from. Both ``None`` until the first workspace-write edit, like the diff,
+    #: and both replaced every time the diff is.
+    change_overview_path: str | None = None
+    diff_base: str | None = None
     checks_path: str | None = None
     review_path: str | None = None
     subtask_count: int | None = None

@@ -1,6 +1,6 @@
 # Phase 01 — Diff overview parser
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none
 - **Delivers:** one pure module that knows what a unified diff touched, per file, and renders the bounded overview text; the supervisor packet uses it and its output does not change.
 

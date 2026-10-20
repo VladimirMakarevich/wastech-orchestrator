@@ -29,6 +29,7 @@ from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
     evaluate_diff_gate,
 )
+from wastech_orchestrator.core.flow.change_guidance import change_guidance_for
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -89,7 +90,8 @@ from wastech_orchestrator.core.hitl import (
     turn_gate_interaction_path,
     typed_output_schema,
 )
-from wastech_orchestrator.git_manager import ChangedPath, GitControlState
+from wastech_orchestrator.diff_overview import CHANGE_OVERVIEW_FILENAME
+from wastech_orchestrator.git_manager import ChangedPath, CurrentDiff, GitControlState
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
@@ -414,6 +416,19 @@ class AgentNodeRunner:
             git_evidence=self._has_git_evidence(node),
         )
 
+    def _always_has_shell(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> bool:
+        """True iff this attempt gets a shell on **every** provider its route may land on.
+
+        Not :meth:`_can_run_commands`, which fails toward "yes" because it guards detection: this
+        one decides whether the node is told to inspect the change with commands, so it is "yes"
+        only when the node is sure to be able to.
+        """
+        return self._s.router.route_always_grants_shell(
+            route,
+            permission_profile=node.permission_profile or ctx.snapshot.doc.permission_ceiling,
+            git_evidence=self._has_git_evidence(node),
+        )
+
     def _granted_shell_before(
         self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
     ) -> _GrantedShellBefore | None:
@@ -662,18 +677,11 @@ class AgentNodeRunner:
         """
         if not self._is_workspace_write(node, ctx) or self._s.git is None:
             return None
-        private_diff = self._s.git.write_current_diff(ctx.task_id)
-        # Keep the private authoritative diff as the audit artifact; expose only the redacted
-        # exchange copy as {diff_path} to the provider.
-        self._in.diff_path = publish_file(
-            self._s.exchange_root,
-            ctx.task_id,
-            "current.diff",
-            private_diff,
-            extra_secrets=self._s.prompt_secrets,
-        )
+        written = self._s.git.write_current_diff(ctx.task_id)
+        self._publish_change(ctx, written)
         if self._s.register_artifact is not None:
-            self._s.register_artifact(ctx.task_id, "diff", private_diff)
+            self._s.register_artifact(ctx.task_id, "diff", written.diff_path)
+            self._s.register_artifact(ctx.task_id, "change_overview", written.overview_path)
         self._apply_output_containment_guard(node, ctx)
         entries = self._s.git.changed_code_entries(ctx.task_id)
         dangerous = evaluate_diff_gate(entries, self._s.trust_level, self._s.protected_paths)
@@ -706,6 +714,29 @@ class AgentNodeRunner:
             mark_consumed(path)
             return None
         return self._reconsider(node, ctx, route, path)
+
+    def _publish_change(self, ctx: NodeContext, written: CurrentDiff) -> None:
+        """Point every later node at the change just written: the diff, its overview, its base.
+
+        The private files stay the audit artifacts; only their redacted exchange copies reach a
+        provider. All three inputs are replaced together, so no node is handed an overview or a
+        base from an earlier pass beside a fresh diff.
+        """
+        self._in.diff_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            "current.diff",
+            written.diff_path,
+            extra_secrets=self._s.prompt_secrets,
+        )
+        self._in.change_overview_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            CHANGE_OVERVIEW_FILENAME,
+            written.overview_path,
+            extra_secrets=self._s.prompt_secrets,
+        )
+        self._in.diff_base = written.base_sha
 
     def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
         """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
@@ -772,14 +803,7 @@ class AgentNodeRunner:
             node, ctx, route, human_input_path=self._exchange_human_input(node, ctx, path)
         )
         assert self._s.git is not None
-        private_diff = self._s.git.write_current_diff(ctx.task_id)
-        self._in.diff_path = publish_file(
-            self._s.exchange_root,
-            ctx.task_id,
-            "current.diff",
-            private_diff,
-            extra_secrets=self._s.prompt_secrets,
-        )
+        self._publish_change(ctx, self._s.git.write_current_diff(ctx.task_id))
         # Re-evaluate under the same policy the request used, so the reconsider pass agrees on which
         # changes gate (level + protected floor) and does not spuriously flag a now-allowed change.
         still_dangerous = evaluate_diff_gate(
@@ -838,6 +862,8 @@ class AgentNodeRunner:
             task_path=self._in.task_path,
             plan_path=self._in.plan_path,
             diff_path=self._in.diff_path,
+            change_overview_path=self._in.change_overview_path,
+            diff_base=self._in.diff_base,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             conflicts_path=self._in.conflicts_path,
@@ -864,6 +890,9 @@ class AgentNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+            change_guidance=change_guidance_for(
+                self._in, ctx, always_has_shell=lambda: self._always_has_shell(node, ctx, route)
+            ),
             # The repository's own harness skills this node must invoke, and whether it may invoke
             # any at all. Names go to the neutral seam as a Core-built prompt block (never through
             # the role renderer, which stays path-only); the resolved switch decides whether each

@@ -176,7 +176,18 @@ _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"
 # ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
 # not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
 _RESERVED_NODE_ID_NAMES = frozenset(
-    {"task", "plan", "diff", "checks", "review", "repo", "memory", "stage", "conflicts"}
+    {
+        "task",
+        "plan",
+        "diff",
+        "change_overview",
+        "checks",
+        "review",
+        "repo",
+        "memory",
+        "stage",
+        "conflicts",
+    }
 )
 _RESERVED_NODE_ID_PREFIX = "subtask"
 

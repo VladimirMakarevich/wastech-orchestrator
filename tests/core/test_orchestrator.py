@@ -1944,6 +1944,62 @@ def test_resume_restores_review_path_from_latest_verdict_run(
     assert findings.exists()
 
 
+def test_resume_hands_back_the_overview_and_base_the_run_wrote(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A resumed node is handed the same change a fresh run would have handed it: the overview is
+    # republished from the private copy the run wrote, and the base is read back from its header
+    # rather than resolved again from a clone that may have moved while the task was stopped.
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+    from wastech_orchestrator.diff_overview import (
+        TASK_BASE_TITLE,
+        OverviewSection,
+        parse_diff,
+        render_overview,
+    )
+
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    tid = "task-resume-overview"
+    store.insert_task(TaskRow(task_id=tid, title="t", status=Status.RUNNING))
+    sha = "d" * 40
+    diff = "diff --git a/s.py b/s.py\n--- a/s.py\n+++ b/s.py\n@@ -1 +1 @@\n-a\n+b\n"
+    overview = render_overview(
+        [OverviewSection(TASK_BASE_TITLE, sha, parse_diff(diff))], diff_size=len(diff)
+    ).encode("utf-8")
+    task_dir = task_artifact_dir(art, tid)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "current.diff").write_text(diff, encoding="utf-8")
+    (task_dir / "change-overview.txt").write_bytes(overview)
+
+    inputs = NodeInputs(flow_dir=str(tmp_path))
+    orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
+    published = exchange_task_dir(orch._exchange_root, tid) / "change-overview.txt"
+    # Published paths are POSIX strings on every platform.
+    assert inputs.change_overview_path == published.as_posix()
+    assert published.read_bytes() == overview
+    assert inputs.diff_base == sha
+
+
+def test_a_resume_before_any_edit_hands_back_no_overview(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+
+    orch, store, _, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-fresh", title="t", status=Status.RUNNING))
+    inputs = NodeInputs(flow_dir=str(tmp_path))
+    orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id="task-fresh")), inputs)
+    assert (inputs.diff_path, inputs.change_overview_path, inputs.diff_base) == (None, None, None)
+
+
 def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:
     providers = _both()
     notifier = RecordingNotifier()

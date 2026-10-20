@@ -578,6 +578,12 @@ def test_agent_node_id_colliding_with_reserved_prefix_rejected(tmp_path: Path) -
         load_flow(_write(tmp_path, body))
 
 
+def test_agent_node_id_shadowing_the_change_overview_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace("    - id: a\n", "    - id: change_overview\n")
+    with pytest.raises(FlowLoadError, match=r"reserved core-variable prefix"):
+        load_flow(_write(tmp_path, body))
+
+
 def test_agent_node_id_subtask_prefix_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace("    - id: a\n", "    - id: subtask_extra\n")
     with pytest.raises(FlowLoadError, match=r"reserved core-variable prefix"):

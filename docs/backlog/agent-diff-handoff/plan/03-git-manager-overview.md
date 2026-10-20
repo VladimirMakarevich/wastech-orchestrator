@@ -1,6 +1,6 @@
 # Phase 03 — Git Manager writes the overview
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** 01
 - **Delivers:** `.worc/logs/<task-id>/change-overview.txt` written in the same call as `current.diff`, from the same snapshot, while `current.diff` stays byte-identical.
 

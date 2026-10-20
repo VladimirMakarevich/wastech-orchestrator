@@ -33,7 +33,7 @@ from wastech_orchestrator.core.flow.output_policy import (
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, PublishNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.git_manager import ChangedPath, PushOutcome
+from wastech_orchestrator.git_manager import ChangedPath, CurrentDiff, PushOutcome
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
@@ -72,6 +72,15 @@ class _Router:
         # where it was dropped.
         override = getattr(self, "grants_shell", None)
         return git_evidence if override is None else bool(override)
+
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # Every route this double resolves has one provider, so "every provider on it" and "any
+        # provider on it" are the same question.
+        return self.route_grants_shell(
+            route, permission_profile=permission_profile, git_evidence=git_evidence
+        )
 
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
@@ -112,8 +121,12 @@ class _Git:
         self.calls: list[str] = []
         self._changed = changed
 
-    def write_current_diff(self, task_id: str) -> str:
-        return "/art/current.diff"
+    def write_current_diff(self, task_id: str) -> CurrentDiff:
+        return CurrentDiff(
+            diff_path="/art/current.diff",
+            overview_path="/art/change-overview.txt",
+            base_sha="0" * 40,
+        )
 
     def changed_code_entries(self, task_id: str = "task-1") -> tuple[ChangedPath, ...]:
         return self._changed
