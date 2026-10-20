@@ -74,8 +74,8 @@ agents:
 
   max_stage_attempts: 3             # provider attempts for ONE node before the stage fails, counting
                                     #   the cross-provider fallback hop (separate from agents.retry below)
-  max_fix_cycles: 15                # max iterations of ONE fix loop (e.g. review/test -> fixing -> back)
-  max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
+  max_fix_cycles: 15                # max fix rounds of ONE fix loop (e.g. review/test -> fixing -> back)
+  max_total_fix_iterations: 30      # hard global cap on fix rounds across all loops (and subtasks); >= max_fix_cycles
 
   decomposition:                    # optional task decomposition; OFF by default
     enabled: false
@@ -109,6 +109,8 @@ agents:
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
                                # prompt (requires telegram); a low cap (~50–100) is then safe
+      background_tasks: false  # false = run subagents in the foreground: headless claude stops
+                               # background tasks when the agent ends its turn, losing their work
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)

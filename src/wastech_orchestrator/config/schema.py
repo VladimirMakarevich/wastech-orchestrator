@@ -205,6 +205,13 @@ class ProviderConfig:
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
+    # Claude-only: whether the agent may start background tasks (``run_in_background`` subagents
+    # and shells). ``false`` (the default) launches the CLI with ``CLAUDE_CODE_DISABLE_BACKGROUND_
+    # TASKS=1``: in headless ``-p`` mode the CLI stops every background task when the agent ends its
+    # turn, so an agent that fans out in the background and then "waits for the results" ends the
+    # run with a promise instead of the work. Subagents still run — in the foreground, where
+    # several launched in one message still run in parallel.
+    background_tasks: bool = False
 
     def effective_model(self, override: str | None) -> str | None:
         """The model an attempt actually runs on: a flow node's ``model``, else this default.

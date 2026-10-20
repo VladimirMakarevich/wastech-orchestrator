@@ -14,9 +14,11 @@ same as a provider that could not run the node at all. A **blocking** evaluator 
 every time it finds a blocking issue; the engine's named-loop budget bounds the rework cycles
 (exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
-(``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
-That budget-exhausted accept sets ``NodeOutcome.rework_exhausted`` so the orchestrator warns
-the operator (console + Telegram trace) the stage moved on with findings still open. Each pass
+(``max_rework_per_stage``) or the engine's budget for its rework edge (the named loop / inline
+budget, or the global backstop) is spent — whichever comes first — then takes the ``accept`` edge
+(-> continue), **never** manual. That budget-exhausted accept sets
+``NodeOutcome.rework_exhausted`` so the orchestrator warns the operator (console + Telegram trace)
+the stage moved on with findings still open. Each pass
 writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
 source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
 mutable counter, so the core stays domain-free (the cap is the node's declared
@@ -35,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from wastech_orchestrator.core.flow.change_guidance import change_guidance_for
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -52,6 +55,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeRun,
     NodeServices,
     open_node_run,
+    provider_fallback_note,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     assert_exchange_unchanged,
@@ -288,6 +292,8 @@ class EvaluatorNodeRunner:
                 kind,
                 findings=findings,
                 rework_exhausted=rework_exhausted,
+                rework_limit=self._exhausted_limit(node, ctx) if rework_exhausted else None,
+                provider_fallback=provider_fallback_note(outcome),
                 unexpected_write=wrote,
                 git_control_drift=drift,
                 # Carry the provider's own prose, not just the typed findings. Without it the
@@ -426,14 +432,24 @@ class EvaluatorNodeRunner:
         # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows,
         # not a mutable counter — then accept (→ continue), never manual. The
         # core stays domain-free: the cap is the node's declared budget, not knowledge of the role.
+        # The engine's own limits bound it too: when the rework edge's loop budget (or the global
+        # backstop) is already spent the engine would refuse the round and park the task, which a
+        # non-blocking node must never do — so it accepts on whichever limit is reached first.
         prior_rework = self._s.store.count_rework_verdicts(
             ctx.task_id, node_id=node.id, subtask_order=ctx.subtask_order
         )
-        if prior_rework < node.max_rework_per_stage:
+        if prior_rework < node.max_rework_per_stage and ctx.rework_refusal is None:
             return "rework", False
         # Budget spent with a gating finding still open: accept and continue, but flag it so the
         # orchestrator warns the operator the stage moved on with work possibly left to do.
         return "accept", True
+
+    @staticmethod
+    def _exhausted_limit(node: EvaluatorNode, ctx: NodeContext) -> str:
+        """Which limit ended a non-blocking evaluator's rework rounds, for the operator warning."""
+        if ctx.rework_refusal is not None:
+            return ctx.rework_refusal
+        return f"max_rework_per_stage ({node.max_rework_per_stage}) spent"
 
     def _build_request(
         self,
@@ -471,6 +487,8 @@ class EvaluatorNodeRunner:
             task_path=self._in.task_path,
             plan_path=self._in.plan_path,
             diff_path=self._in.diff_path,
+            change_overview_path=self._in.change_overview_path,
+            diff_base=self._in.diff_base,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             conflicts_path=self._in.conflicts_path,
@@ -505,6 +523,22 @@ class EvaluatorNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+            change_guidance=change_guidance_for(
+                self._in, ctx, always_has_shell=lambda: self._always_has_shell(node, route)
+            ),
+        )
+
+    def _always_has_shell(self, node: EvaluatorNode, route: ResolvedRoute) -> bool:
+        """True iff this evaluator attempt gets a shell on **every** provider its route may reach.
+
+        The opposite default to :meth:`_attempt_has_shell`, which guards detection: a reviewer is
+        sent to inspect files with commands only when it is sure to be able to, and otherwise to
+        the full diff.
+        """
+        return self._s.router.route_always_grants_shell(
+            route,
+            permission_profile=node.permission_profile.value,
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
         )
 
     def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:

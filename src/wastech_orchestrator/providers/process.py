@@ -97,6 +97,40 @@ class ProcessResult:
     quiescence: QuiescenceResult | None = None
 
 
+class OutputSettleTracker(Protocol):
+    """Reads a child's stdout line by line and says when that output is complete.
+
+    Supplied by an adapter, because only the adapter knows its CLI's stream: this runner stays
+    provider-agnostic and asks a single yes/no question of it.
+    """
+
+    def feed(self, line: str) -> None:
+        """Consume one complete stdout line (without its newline)."""
+        ...
+
+    @property
+    def settled(self) -> bool:
+        """The output so far is a finished run — nothing more is owed by the child."""
+        ...
+
+
+@dataclass(frozen=True)
+class SettleWatch:
+    """Stop a child that stays silent after its own output says it has finished.
+
+    A CLI that already wrote its final result should exit within a second. One that instead sits
+    idle — no output, no CPU — holds the whole run hostage until the wall-clock timeout, which for a
+    long node is hours. The watch reads stdout as it grows, and once the tracker reports the output
+    settled AND nothing new has been written for ``idle_seconds``, the child's tree is terminated
+    so the adapter can treat the stream as the complete run it already is. Enforced by
+    :class:`SettlingContainment`.
+    """
+
+    make_tracker: Callable[[], OutputSettleTracker]
+    idle_seconds: float
+    poll_seconds: float = 2.0
+
+
 @dataclass(frozen=True)
 class AgentHandleRecorder:
     """Callbacks that let :func:`run_process` record the agent it just launched, so a hard stop can
@@ -678,6 +712,78 @@ def run_process(
         stderr_text=stderr_text,
         quiescence=quiescence,
     )
+
+
+class SettlingContainment:
+    """The platform containment, plus a watcher that stops a child already done but not exiting.
+
+    Wraps the containment :func:`run_process` would have used, so the kill, the process-tree
+    proof and the quiescence barrier are exactly the ordinary ones: the watcher only decides *when*
+    to call the same ``terminate`` a timeout calls. It starts when the child is adopted and stops
+    before the tree is proven empty. :attr:`settled` says whether it fired.
+
+    It reads only what was appended to stdout since the last poll, so a multi-megabyte stream costs
+    one pass. The child keeps writing through its own handle; this opens a separate read handle,
+    which both POSIX and Windows (the CRT's default share mode) allow. Idle time is measured on the
+    real monotonic clock, independent of any clock an adapter injects for its own durations.
+    """
+
+    def __init__(
+        self,
+        watch: SettleWatch,
+        stdout_path: str | os.PathLike[str],
+        inner: ProcessContainment | None = None,
+    ) -> None:
+        self._watch = watch
+        self._stdout_path = Path(stdout_path)
+        self._inner = inner if inner is not None else _default_make_containment()
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.settled = threading.Event()
+
+    def popen_kwargs(self) -> dict[str, Any]:
+        return self._inner.popen_kwargs()
+
+    def adopt(self, proc: subprocess.Popen[Any]) -> None:
+        self._inner.adopt(proc)
+        self._thread = threading.Thread(
+            target=self._watch_child, args=(proc,), name="worc-settle-watch", daemon=True
+        )
+        self._thread.start()
+
+    def terminate(self) -> None:
+        self._inner.terminate()
+
+    def terminate_and_prove(self) -> QuiescenceResult:
+        self._done.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        return self._inner.terminate_and_prove()
+
+    def _watch_child(self, proc: subprocess.Popen[Any]) -> None:
+        tracker = self._watch.make_tracker()
+        offset = 0
+        pending = b""
+        last_growth = time.monotonic()
+        while not self._done.wait(self._watch.poll_seconds):
+            try:
+                with self._stdout_path.open("rb") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+            except OSError:
+                continue
+            if chunk:
+                offset += len(chunk)
+                last_growth = time.monotonic()
+                *lines, pending = (pending + chunk).split(b"\n")
+                for raw in lines:
+                    tracker.feed(raw.decode("utf-8", errors="replace"))
+                continue
+            idle = time.monotonic() - last_growth
+            if tracker.settled and idle >= self._watch.idle_seconds and proc.poll() is None:
+                self.settled.set()
+                self._inner.terminate()
+                return
 
 
 def spawn_detached(

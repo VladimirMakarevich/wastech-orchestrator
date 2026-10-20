@@ -27,6 +27,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.git_manager import (
     ChangedPath,
+    CurrentDiff,
     GitControlDrift,
     GitControlState,
     PushOutcome,
@@ -34,7 +35,7 @@ from wastech_orchestrator.git_manager import (
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
-from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
+from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
@@ -54,6 +55,33 @@ RegisterArtifact = Callable[[str, str, str], None]
 #: launches its scanners through (argv-without-shell, mandatory timeout, and the policy-built child
 #: env — the allowlist under strict isolation, the parent environment whole in the advanced mode).
 RunProcess = Callable[..., ProcessResult]
+
+
+def provider_fallback_note(outcome: StageOutcome) -> str | None:
+    """One operator line when a stage ran somewhere other than its route's primary, else ``None``.
+
+    Names the provider the node was routed to, the one it actually ran on, and why the first one
+    failed — and says when the flow pinned the provider itself, because then the fallback undoes a
+    deliberate choice (``enrich-07b``: a critic pinned to Codex so a different model would judge the
+    Claude-built material, silently judged by Claude in all three passes).
+    """
+    route = outcome.route
+    used = outcome.provider_used
+    if used is None or used == route.primary:
+        return None
+    failed = next(
+        (
+            attempt.error_class.value
+            for attempt in outcome.attempts
+            if attempt.provider == route.primary and attempt.error_class is not None
+        ),
+        None,
+    )
+    why = f" after {route.primary.value} failed ({failed})" if failed else ""
+    pinned = (
+        " — the flow pinned this node's provider" if route.source is RouteSource.FLOW_NODE else ""
+    )
+    return f"routed to {route.primary.value}, ran on {used.value}{why}{pinned}"
 
 
 class NodeInfraError(Exception):
@@ -133,11 +161,19 @@ class RouterPort(Protocol):
     per-attempt fact the Git-control detection brackets key on. It belongs to the Router because
     only the adapters can answer it (and both ends of a route must be asked), and to this protocol
     because a runner must be able to ask before it builds a request.
+
+    ``route_always_grants_shell`` is the opposite question with the opposite default — whether
+    *every* provider on the route gives the attempt a shell, unknown counting as no — and decides
+    whether a node may be told to inspect the change with commands.
     """
 
     def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
 
     def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool: ...
+
+    def route_always_grants_shell(
         self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
     ) -> bool: ...
 
@@ -344,7 +380,9 @@ class GitPort(Protocol):
         references_block: str | None = None,
     ) -> str | None: ...
 
-    def write_current_diff(self, task_id: str) -> str: ...
+    #: The task's full diff and its bounded overview, written together from one snapshot, plus the
+    #: full SHA both are measured from.
+    def write_current_diff(self, task_id: str) -> CurrentDiff: ...
 
     #: The task's change — committed or not — measured from the gate's reference point, not from
     #: ``HEAD``: a commit made inside the task must not be able to empty the dangerous-diff gate.
@@ -451,6 +489,11 @@ class NodeInputs:
     task_path: str | None = None
     plan_path: str | None = None
     diff_path: str | None = None
+    #: the exchange copy of the change overview written with ``diff_path``, and the full SHA the
+    #: change is measured from. Both ``None`` until the first workspace-write edit, like the diff,
+    #: and both replaced every time the diff is.
+    change_overview_path: str | None = None
+    diff_base: str | None = None
     checks_path: str | None = None
     review_path: str | None = None
     subtask_count: int | None = None

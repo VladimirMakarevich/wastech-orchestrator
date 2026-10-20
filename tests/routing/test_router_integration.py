@@ -196,6 +196,47 @@ def test_infra_failure_after_changes_hands_diff_to_fallback(
     assert hook.partial_calls == 1
 
 
+def test_a_partial_diff_fallback_is_handed_no_change_overview(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_snapshot_hook: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # The overview, its base and the guidance describe the change Core wrote; the attempt handed
+    # the partial diff instead gets the footer it would have had without them.
+    diff_path = str(tmp_path / "partial.diff")
+    snap = WorkingTreeSnapshot(
+        commit_sha="sha-after", porcelain_status=" M file.py", diff_checksum="ck1", artifacts=()
+    )
+    partial = PartialChange(before=snap, after=snap, diff_path=diff_path, note="partial attempt")
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.TIMEOUT)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("review", ProviderId.CODEX)
+    request = make_request(
+        node_id="review",
+        diff_path="cumulative.diff",
+        change_overview_path="change-overview.txt",
+        diff_base="c" * 40,
+        change_guidance="Start from the change overview.",
+    )
+
+    router.run_stage(request, route, snapshot=make_snapshot_hook(partial))
+
+    assert primary.requests[0].change_overview_path == "change-overview.txt"
+    handed = fallback.requests[0]
+    assert handed.diff_path == diff_path
+    assert (handed.change_overview_path, handed.diff_base, handed.change_guidance) == (
+        None,
+        None,
+        None,
+    )
+    footer = build_effective_prompt(handed)
+    assert f"- diff: {diff_path}" in footer
+    assert "change overview" not in footer and "Change base" not in footer
+
+
 def test_cross_provider_fallback_drops_provider_specific_request_fields(
     config: OrchestratorConfig,
     make_fake_provider: Callable[..., object],

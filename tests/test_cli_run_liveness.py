@@ -298,3 +298,40 @@ def test_the_other_shared_clone_commands_refuse_too(
     assert code == 1
     assert started == []
     assert "run" in capsys.readouterr().out
+
+
+def test_a_rerun_is_a_live_executor_for_its_whole_duration(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    # `rerun --continue` drives the pipeline exactly as `run` does but recorded nothing, so while it
+    # worked its task read `parked (no daemon)` — which external monitoring took for a finished run
+    # (`enrich-07b`). The marker now covers a rerun too, and is reaped when it returns.
+    from wastech_orchestrator.core.orchestrator import RerunPlan
+
+    store = StateStore.open(Path(cli.worc_home_for(in_repo_config)) / "state.db")
+    store.insert_task(TaskRow(task_id="task-1", title="T", status=Status.RUNNING))
+    store.close()
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    seen: dict[str, object] = {}
+
+    class _Orch:
+        def plan_rerun(self, task_id: str, **_kwargs: object) -> RerunPlan:
+            return RerunPlan(task_id=task_id, continue_mode=True, found=True, branch="b")
+
+        def continue_task(self, task_id: str, **_kwargs: object) -> PipelineResult:
+            seen["during"] = marker.exists()
+            row = TaskRow(task_id=task_id, title="T", status=Status.RUNNING)
+            alive = cli._executor_alive(in_repo_config)
+            seen["label"] = cli._display_status(row, executor_alive=alive)
+            return PipelineResult(task_id=task_id, final_status=Status.DONE)
+
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: _Orch())
+    monkeypatch.setattr(cli, "require_launch_environment", lambda *a, **k: None)
+    monkeypatch.setattr(cli.preflight, "require_git_control", lambda: None)
+
+    assert cli.main(["rerun", "task-1", "--continue", "-y", "--non-interactive"]) == 0
+
+    assert seen["during"] is True
+    assert "parked" not in str(seen["label"])
+    assert not marker.exists()

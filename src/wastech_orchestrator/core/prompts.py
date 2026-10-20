@@ -27,6 +27,10 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
         "task_path",
         "plan_path",
         "diff_path",
+        # the bounded overview of the change beside the diff, and the full SHA it is measured
+        # from (a commit id, not content); both empty until the first workspace-write edit
+        "change_overview_path",
+        "diff_base",
         "checks_path",
         "review_path",
         "subtask_order",

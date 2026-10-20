@@ -52,6 +52,8 @@ from wastech_orchestrator.providers.errors import StderrSignature, classify, mes
 from wastech_orchestrator.providers.process import (
     AgentHandleRecorder,
     ProcessResult,
+    SettleWatch,
+    SettlingContainment,
     run_process,
 )
 from wastech_orchestrator.providers.redaction import (
@@ -120,6 +122,11 @@ class ParsedEvents:
     # one. Epoch here and ISO on the raised error: each adapter owns its own CLI's spelling, and
     # exactly one place converts. ``None`` when the CLI reports no reset instant at all.
     rate_limit_resets_at: float | None = None
+    # Background work the agent started that the provider's runtime stopped before it finished
+    # (one short label per task), read from the CLI's own stream. Non-empty means the terminal
+    # "success" was produced without that work, so the attempt is raised as BACKGROUND_WORK_LOST
+    # rather than accepted. Empty for a provider that has no background tasks.
+    abandoned_work: tuple[str, ...] = ()
 
 
 #: Isolation-probe verdicts, shared by both adapters so one vocabulary describes both probes (the
@@ -326,6 +333,15 @@ class BaseCliProvider:
         Default: return ``env`` unchanged.
         """
         return env
+
+    def _settle_watch(self, request: AgentRunRequest) -> SettleWatch | None:
+        """Subclass hook: how to tell, from this CLI's stdout, that the run is already finished.
+
+        ``None`` (the default) waits for the process alone. An adapter whose CLI can stay alive
+        after writing its final result returns a :class:`SettleWatch`, and the runner stops such
+        a child once its output reads as finished and it has been silent for the watch's window.
+        """
+        return None
 
     def _post_success_infra_error(self, stderr_text: str) -> NormalizedError | None:
         """Subclass hook: veto a parseable terminal *success* when stderr proves it did no work.
@@ -540,6 +556,12 @@ class BaseCliProvider:
             provider=self.id,
             attempt=request.attempt,
         )
+        # Passed only when the adapter has one, so a runner seam that predates it is still valid.
+        settle = self._settle_watch(request)
+        settling = SettlingContainment(settle, paths.stdout_path) if settle is not None else None
+        settle_kwargs: dict[str, Any] = (
+            {"make_containment": lambda: settling} if settling is not None else {}
+        )
         proc = run_with_heartbeat(
             lambda: self._run_process(
                 self._pinned_argv(argv),
@@ -550,6 +572,7 @@ class BaseCliProvider:
                 stdin_text=self._stdin_text(request),
                 monotonic=self._monotonic,
                 recorder=self._agent_handle_recorder,
+                **settle_kwargs,
             ),
             logger=log,
             message="provider heartbeat",
@@ -557,6 +580,14 @@ class BaseCliProvider:
             fields={"timeout_seconds": request.timeout_seconds},
         )
         finished_at = self._clock().isoformat()
+        if settling is not None and settle is not None and settling.settled.is_set():
+            # Not an error: the stream already held the run's final result. Said at warning level
+            # because the alternative was a node silently holding the run for its whole timeout.
+            log.warning(
+                "the provider wrote its final result and then sat idle for %ds without exiting; "
+                "worc stopped it and is using that result",
+                int(settle.idle_seconds),
+            )
 
         # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
@@ -673,6 +704,22 @@ class BaseCliProvider:
             failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise ProviderError(error.error_class, error.message, result=failed)
 
+        if parsed.succeeded and parsed.abandoned_work:
+            # A terminal "success" produced while background work the agent itself started was
+            # stopped by the provider's runtime: the closing message is a promise ("waiting for the
+            # searches"), not the work. Accepting it as done is what turned two $25 research nodes
+            # into an 87-character hand-off. Raised so the node stops with this reason named; the
+            # usage rides along, because the money was spent whether or not the work survived.
+            lost = "; ".join(parsed.abandoned_work)
+            error = NormalizedError(
+                ErrorClass.BACKGROUND_WORK_LOST,
+                f"{message_for(ErrorClass.BACKGROUND_WORK_LOST)} ({lost})",
+            )
+            failed = self._finalize_failure(
+                paths, request, started_at, finished_at, proc, error, parsed=parsed
+            )
+            raise ProviderError(error.error_class, error.message, result=failed)
+
         if parsed.succeeded:
             infra_error = self._post_success_infra_error(proc.stderr_text)
             if infra_error is not None:
@@ -759,6 +806,8 @@ class BaseCliProvider:
             "task_path": request.task_path,
             "plan_path": request.plan_path,
             "diff_path": request.diff_path,
+            "change_overview_path": request.change_overview_path,
+            "diff_base": request.diff_base,
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
@@ -793,7 +842,11 @@ class BaseCliProvider:
         finished_at: str,
         proc: ProcessResult,
         error: NormalizedError,
+        *,
+        parsed: ParsedEvents | None = None,
     ) -> AgentRunResult:
+        """Record a failed attempt. ``parsed`` carries the usage of a run that did spend tokens
+        before it was rejected, so its cost is still accounted rather than read as unpriced."""
         result = AgentRunResult(
             status=RunStatus.FAILED,
             provider=self.id,
@@ -808,6 +861,7 @@ class BaseCliProvider:
             stderr_path=paths.stderr_path,
             event_log_path=paths.events_path,
             error=error,
+            normalized_usage=parsed.normalized_usage if parsed is not None else None,
         )
         write_result_artifact(paths, result)
         # ``minimal`` is strict — only result.json + request.json survive, even on failure (the

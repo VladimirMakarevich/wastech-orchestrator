@@ -1013,12 +1013,16 @@ def test_a_fresh_rerun_does_not_inherit_the_previous_attempts_repeats(store: Sta
 
 def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     store.insert_task(_new_task())
-    for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
+    for verdict in ("rework", "accept", "rework"):
+        # Counted only while the verdict's node run exists (a fresh rerun deletes those).
+        run_id = store.record_node_run(
+            NodeRunRow(task_id="task-001", node_id="review", node_kind="evaluator")
+        )
         store.record_evaluation(
             EvaluationRow(
                 task_id="task-001",
                 node_id="review",
-                source_node_run_id=i,
+                source_node_run_id=run_id,
                 kind="in_flow_verdict",
                 verdict=verdict,
                 findings_json="[]",

@@ -54,6 +54,15 @@ def test_lint_flags_typo_variable(tmp_path: Path) -> None:
     assert [(w.role_file, w.token) for w in warnings] == [("t/implement.md", "plna_path")]
 
 
+def test_lint_passes_the_change_overview_and_its_base(tmp_path: Path) -> None:
+    # Both may be empty before the first edit, so an author uses them inside a block.
+    body = (
+        "{?change_overview_path}Overview: {change_overview_path}, base {diff_base}."
+        "{/change_overview_path}"
+    )
+    assert lint_prompt_variables(_load(tmp_path, body)) == []
+
+
 def test_lint_passes_known_vars_and_conditional_blocks(tmp_path: Path) -> None:
     # Core allowlisted vars, inside a {?...} block or bare, produce no warning.
     body = "task {task_id} {?memory_path}see {memory_path}{/memory_path} at {repo}"

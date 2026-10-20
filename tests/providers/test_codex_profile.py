@@ -348,15 +348,24 @@ def test_the_root_grant_takes_the_windows_shape_through_the_native_seam(tmp_path
     assert profile["filesystem"][to_win(root / ".git")] == "read"
 
 
-def test_a_relative_workspace_gets_no_root_grant(tmp_path: Path) -> None:
-    # A relative working directory is a unit harness, not an attempt, and its anchor names no
-    # volume: granting `.` would be a rule about the process's cwd, which is not what this means.
+def test_a_relative_workspace_is_anchored_before_it_becomes_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex refuses a relative filesystem key ("must be absolute"), and a relative `repo.local_path`
+    # — the loader's own default is `./workspace/repo` — is a real attempt, not a harness. So the
+    # workspace is resolved against the process's working directory first, and then gets exactly
+    # the keys an absolute one would, the advanced mode's volume grant included.
+    monkeypatch.chdir(tmp_path)
     profile = build_codex_permission_profile(
         permission_profile="workspace-write",
         working_directory="clone",
-        deny_policy=None,
+        deny_policy=_deny(Path("clone")),
         write_guard=None,
         denied_read_paths=(),
         strict_isolation=False,
     )
-    assert set(profile["filesystem"]) == {":minimal", "clone"}
+    keys = set(profile["filesystem"]) - {":minimal"}
+    assert str(tmp_path / "clone") in keys
+    assert str(tmp_path / "clone" / ".worc") in keys
+    assert str(Path(tmp_path.anchor)) in keys
+    assert all(Path(key).is_absolute() for key in keys), keys

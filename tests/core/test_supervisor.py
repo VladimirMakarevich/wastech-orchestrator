@@ -108,6 +108,15 @@ class FakeRouter:
         override = getattr(self, "grants_shell", None)
         return git_evidence if override is None else bool(override)
 
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # Every route this double resolves has one provider, so "every provider on it" and "any
+        # provider on it" are the same question.
+        return self.route_grants_shell(
+            route, permission_profile=permission_profile, git_evidence=git_evidence
+        )
+
     def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
         self.route_providers.append(provider)
         return ResolvedRoute(
@@ -1869,12 +1878,17 @@ def test_record_rework_single_increment() -> None:
 
 def test_evaluation_immutable_and_counted(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
+    for verdict in ("rework", "accept", "rework"):
+        # A verdict counts against the rework budget only while the node run it came from exists
+        # (a fresh rerun deletes them), so each verdict is attached to a real run row.
+        run_id = store.record_node_run(
+            NodeRunRow(task_id=_TASK, node_id="review", node_kind="evaluator", status="succeeded")
+        )
         store.record_evaluation(
             EvaluationRow(
                 task_id=_TASK,
                 node_id="review",
-                source_node_run_id=i,
+                source_node_run_id=run_id,
                 kind="in_flow_verdict",
                 verdict=verdict,
                 findings_json="[]",
@@ -1922,6 +1936,15 @@ class _AttemptsRouter:
         # where it was dropped.
         override = getattr(self, "grants_shell", None)
         return git_evidence if override is None else bool(override)
+
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # Every route this double resolves has one provider, so "every provider on it" and "any
+        # provider on it" are the same question.
+        return self.route_grants_shell(
+            route, permission_profile=permission_profile, git_evidence=git_evidence
+        )
 
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None

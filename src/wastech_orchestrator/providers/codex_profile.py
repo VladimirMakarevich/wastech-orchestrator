@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.providers.base import ErrorClass, ProviderError
-from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
+from wastech_orchestrator.runtime_layout import (
+    InternalDenyPolicy,
+    ProviderWriteGuardPolicy,
+    anchored,
+)
 
 # The orchestrator-owned profile name. A bare name (no leading ``:``) so it never collides with a
 # reserved built-in profile prefix (``:read-only`` / ``:workspace`` / ``:danger-full-access``).
@@ -144,7 +148,7 @@ def build_codex_permission_profile(
             f"unsupported Codex permission_profile {permission_profile!r}; "
             f"expected one of {sorted(_EXTENDS)}",
         )
-    workspace_root = Path(working_directory)
+    workspace_root = anchored(Path(working_directory))
     filesystem: dict[str, Any] = {":minimal": "read"}
     if not strict_isolation and workspace_root.anchor:
         # Advanced mode: write anywhere on this volume, expressed as the workspace path's anchor so
@@ -158,7 +162,7 @@ def build_codex_permission_profile(
     # Readable-but-not-writable roots (workspace-write attempts only; read-only denies all writes).
     if write_guard is not None:
         for path in write_guard.denied_write_paths:
-            filesystem[to_native(path)] = "read"
+            filesystem[to_native(anchored(path))] = "read"
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
@@ -170,7 +174,7 @@ def build_codex_permission_profile(
         # re-execs it under the sandbox as its filesystem helper, so a deny there breaks every
         # patch. The public ``denied_read_paths`` blacklist below is ``deny`` regardless.
         for path in deny_policy.denied_paths:
-            filesystem[to_native(path)] = "deny"
+            filesystem[to_native(anchored(path))] = "deny"
     for pattern in denied_read_paths:
         if not pattern.strip():
             continue
