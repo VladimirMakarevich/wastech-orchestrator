@@ -147,13 +147,27 @@ def _overview_section(
     may not read under its old name any more than under its new one.
     """
     entries = parse_diff(diff_text)
+    patterns = tuple(p.strip() for p in denied_patterns if p.strip())
     denied = frozenset(
         path
         for entry in entries
         for path in (entry.path, entry.previous_path)
-        if path is not None and path_matches_any(path, denied_patterns)
+        if path is not None and _is_denied(path, patterns)
     )
     return OverviewSection(title=title, base_sha=base_sha, entries=entries, denied=denied)
+
+
+def _is_denied(path: str, patterns: Sequence[str]) -> bool:
+    """Whether a denied-read glob covers *path* itself or any directory above it.
+
+    A pattern that names a directory covers everything in it, the way the denied-file secret
+    harvester expands a matched directory to its whole subtree — so ``config/private`` marks
+    ``config/private/keys.yaml`` as well as the directory entry itself.
+    """
+    parts = path.split("/")
+    return any(
+        path_matches_any("/".join(parts[:depth]), patterns) for depth in range(len(parts), 0, -1)
+    )
 
 
 _RUNTIME_IGNORE_COMMENT = (
@@ -1329,7 +1343,12 @@ class GitManager:
         command-line ``-c`` overrides repo/global/system config, beating a repo that sets its own
         hooks path or a program-launching config key. Every patch/textconv-capable ``diff`` also
         gets ``--no-textconv --no-ext-diff`` so a repo-selected textconv/external-diff driver never
-        runs (harmless on ``--name-only``/``--name-status``/``--stat``/``--cached --check``).
+        runs, and a fixed output shape — ``--no-color --src-prefix=a/ --dst-prefix=b/`` — because
+        the orchestrator parses what it writes: ``color.diff=always`` would wrap every line in
+        escapes and ``diff.mnemonicPrefix``/``diff.noprefix`` would change the ``a/``/``b/`` names
+        the changed paths are read from. All of these are harmless on
+        ``--name-only``/``--name-status``/``--stat``/``--cached --check``, and on the operator's
+        default config the output is byte-identical.
         """
         if not argv or argv[0] != "git":
             return argv
@@ -1338,7 +1357,15 @@ class GitManager:
             prefix += ["-c", f"{key}={value}"]
         rest = argv[1:]
         if rest and rest[0] == "diff":
-            rest = ["diff", "--no-textconv", "--no-ext-diff", *rest[1:]]
+            rest = [
+                "diff",
+                "--no-textconv",
+                "--no-ext-diff",
+                "--no-color",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                *rest[1:],
+            ]
         return [argv[0], *prefix, *rest]
 
     def _git(self, *args: str) -> GitResult:
@@ -3693,13 +3720,16 @@ class GitManager:
         ``security.denied_read_paths`` is listed by name and counts only, marked ``[denied]``; the
         overview never carries hunk content, and it is redacted with the same secrets as the diff.
 
-        Both references are resolved to full SHAs before the index is touched, and a reference that
-        does not resolve raises :class:`GitCommandError` — handing a node a change measured from
-        nowhere would be worse than stopping. Nothing is written until both texts exist, so a
-        failure leaves the previous pair in place rather than a fresh diff beside a stale overview.
+        The base is resolved to a full SHA before the index is touched, and a base that does not
+        resolve raises :class:`GitCommandError` — handing a node a change measured from nowhere
+        would be worse than stopping. The gate reference only feeds the optional second section, so
+        one the clone does not hold (a re-created clone under a surviving ``state.db``) is a
+        warning and the section is left out, never a failed node. Nothing is written until both
+        texts exist, so a failure leaves the previous pair in place rather than a fresh diff beside
+        a stale overview.
         """
         base_sha = self._resolve_commit(self._diff_base())
-        gate_sha = self._resolve_commit(self.gate_reference(task_id))
+        gate_sha = self._gate_sha(task_id, base_sha)
         pathspec = ("--", ":/", *_runtime_exclude_pathspecs(RUNTIME_EXCLUDED_DIRS))
         untracked = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout
         untracked_paths = [p for p in untracked.split("\0") if p]
@@ -3709,7 +3739,7 @@ class GitManager:
             diff = self._git("diff", "--text", base_sha, *pathspec).stdout
             since_gate = (
                 None
-                if gate_sha == base_sha
+                if gate_sha is None
                 else self._git("diff", "--text", gate_sha, *pathspec).stdout
             )
         finally:
@@ -3719,10 +3749,11 @@ class GitManager:
         redacted = redact_text(diff, extra_secrets=secrets)
         denied_patterns = self._config.security.denied_read_paths
         sections = [_overview_section(TASK_BASE_TITLE, base_sha, redacted, denied_patterns)]
-        if since_gate is not None:
-            since_redacted = redact_text(since_gate, extra_secrets=secrets)
+        if gate_sha is not None and since_gate is not None:
+            # Parsed raw: only paths and counts are taken from it, and the rendered overview is
+            # redacted as a whole below.
             sections.append(
-                _overview_section(LAST_COMMIT_TITLE, gate_sha, since_redacted, denied_patterns)
+                _overview_section(LAST_COMMIT_TITLE, gate_sha, since_gate, denied_patterns)
             )
         overview = redact_text(
             render_overview(sections, diff_size=len(redacted.encode("utf-8"))),
@@ -3748,6 +3779,24 @@ class GitManager:
     def _resolve_commit(self, ref: str) -> str:
         """The full SHA of the commit *ref* names; :class:`GitCommandError` when it names none."""
         return self._git_checked("rev-parse", "--verify", f"{ref}^{{commit}}")
+
+    def _gate_sha(self, task_id: str, base_sha: str) -> str | None:
+        """The gate reference's full SHA when it differs from *base_sha*; ``None`` otherwise.
+
+        ``None`` too when the recorded reference names no commit in this clone: it is logged and the
+        overview carries the task-base section alone.
+        """
+        reference = self.gate_reference(task_id)
+        try:
+            gate_sha = self._resolve_commit(reference)
+        except GitCommandError:
+            bind(_LOG, task_id=task_id, component="diff").warning(
+                "gate reference %s names no commit in this clone; the change overview lists the "
+                "change since the task base only",
+                reference,
+            )
+            return None
+        return None if gate_sha == base_sha else gate_sha
 
     def control_byte_paths(self) -> list[str]:
         """Repo-relative POSIX paths of this task's changed files that contain a NUL byte.

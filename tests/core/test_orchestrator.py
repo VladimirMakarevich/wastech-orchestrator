@@ -1978,7 +1978,8 @@ def test_resume_hands_back_the_overview_and_base_the_run_wrote(
     inputs = NodeInputs(flow_dir=str(tmp_path))
     orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
     published = exchange_task_dir(orch._exchange_root, tid) / "change-overview.txt"
-    assert inputs.change_overview_path == str(published)
+    # Published paths are POSIX strings on every platform.
+    assert inputs.change_overview_path == published.as_posix()
     assert published.read_bytes() == overview
     assert inputs.diff_base == sha
 

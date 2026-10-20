@@ -15,7 +15,33 @@ Built here rather than in a role prompt because a prompt cannot branch on capabi
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
 from wastech_orchestrator.diff_overview import LAST_COMMIT_TITLE
+
+if TYPE_CHECKING:
+    from wastech_orchestrator.core.flow.engine import NodeContext
+    from wastech_orchestrator.core.flow.nodes.base import NodeInputs
+
+
+def change_guidance_for(
+    inputs: NodeInputs, ctx: NodeContext, *, always_has_shell: Callable[[], bool]
+) -> str | None:
+    """The sentence for a node's request, or ``None`` before an edit has given it a change.
+
+    The one place that decides when the sentence is attached, for every runner that builds a
+    request. *always_has_shell* answers for every provider on the node's route — the runner owns
+    that question because the permission profile and the git-evidence grant are resolved there —
+    and it is asked only when there is a change to point the node at.
+    """
+    if inputs.change_overview_path is None or inputs.diff_base is None:
+        return None
+    return change_guidance(
+        base_sha=inputs.diff_base,
+        has_shell=always_has_shell(),
+        decomposed=ctx.subtask_order is not None,
+    )
 
 
 def change_guidance(*, base_sha: str, has_shell: bool, decomposed: bool) -> str:

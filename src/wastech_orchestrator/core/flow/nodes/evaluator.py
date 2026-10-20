@@ -37,7 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from wastech_orchestrator.core.flow.change_guidance import change_guidance
+from wastech_orchestrator.core.flow.change_guidance import change_guidance_for
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -523,28 +523,22 @@ class EvaluatorNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
-            change_guidance=self._change_guidance(node, ctx, route),
+            change_guidance=change_guidance_for(
+                self._in, ctx, always_has_shell=lambda: self._always_has_shell(node, route)
+            ),
         )
 
-    def _change_guidance(
-        self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> str | None:
-        """Where this evaluator should start on the change, or ``None`` before there is one.
+    def _always_has_shell(self, node: EvaluatorNode, route: ResolvedRoute) -> bool:
+        """True iff this evaluator attempt gets a shell on **every** provider its route may reach.
 
-        Asks whether **every** provider on the route grants a shell — the opposite default to
-        :meth:`_attempt_has_shell`, which guards detection — so a reviewer is sent to inspect files
-        with commands only when it is sure to be able to, and otherwise to the full diff.
+        The opposite default to :meth:`_attempt_has_shell`, which guards detection: a reviewer is
+        sent to inspect files with commands only when it is sure to be able to, and otherwise to
+        the full diff.
         """
-        if self._in.change_overview_path is None or self._in.diff_base is None:
-            return None
-        return change_guidance(
-            base_sha=self._in.diff_base,
-            has_shell=self._s.router.route_always_grants_shell(
-                route,
-                permission_profile=node.permission_profile.value,
-                git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
-            ),
-            decomposed=ctx.subtask_order is not None,
+        return self._s.router.route_always_grants_shell(
+            route,
+            permission_profile=node.permission_profile.value,
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
         )
 
     def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:

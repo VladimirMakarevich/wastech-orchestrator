@@ -97,14 +97,16 @@ def parse_diff(diff_text: str) -> tuple[DiffEntry, ...]:
 
     Header lines (``---``/``+++``, mode and rename lines) are read only before a block's first
     ``@@``; after it every ``+``/``-`` line is a hunk line, so a removed line whose own text begins
-    with ``--`` is counted rather than mistaken for a header. ``splitlines`` rather than a split on
-    ``\\n`` on purpose: a diff written in text mode on Windows and read back then yields the same
-    lines it did in memory, so a count taken before the write equals one taken from the artifact.
+    with ``--`` is counted rather than mistaken for a header. Lines end exactly where a text-mode
+    read ends them — at ``\\n``, ``\\r\\n`` or ``\\r`` — so a diff parsed in memory and the same
+    diff read back from its artifact on any platform give the same entries. ``str.splitlines`` is
+    deliberately not used: it also breaks at form feeds and Unicode line separators, which are
+    ordinary file content to git, and content would then be read as extra diff lines.
     """
     entries: list[DiffEntry] = []
     block: _Block | None = None
     in_header = False
-    for line in diff_text.splitlines():
+    for line in diff_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if line.startswith(_GIT_HEADER):
             _close(block, entries)
             block, in_header = _Block(git_line=line[len(_GIT_HEADER) :]), True
@@ -220,9 +222,10 @@ def _close(block: _Block | None, entries: list[DiffEntry]) -> None:
 def _render_section(section: OverviewSection, *, diff_size: int | None) -> str:
     entries = section.entries
     added, removed = total_counts(entries)
-    header = (
-        f"{section.title} {section.base_sha} — {_count_files(len(entries))}, +{added} −{removed}"
-    )
+    # Files, not entries: git shows a type change (a file replaced by a symlink) as a deletion and
+    # an addition of one path, and the count must match the pull request's, which names it once.
+    files = _count_files(len({entry.path for entry in entries}))
+    header = f"{section.title} {section.base_sha} — {files}, +{added} −{removed}"
     if diff_size is not None:
         header += f", full diff {_format_size(diff_size)}"
     lines = [header, ""]

@@ -1334,7 +1334,8 @@ def test_the_change_overview_is_published_to_the_exchange(tmp_path: Path) -> Non
     inputs = _inputs(tmp_path)
     AgentNodeRunner(services, inputs).run(_ws_node(), _ctx(_ws_node()))
     published = exchange_task_dir(str(exchange_root), "task-1") / "change-overview.txt"
-    assert inputs.change_overview_path == str(published)
+    # Published paths are POSIX strings on every platform.
+    assert inputs.change_overview_path == published.as_posix()
     assert published.read_bytes() == b"Change since the task base x\n"
 
 

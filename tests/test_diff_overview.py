@@ -126,6 +126,30 @@ def test_crlf_text_parses_to_the_same_entries() -> None:
     assert parse_diff(_DIFF.replace("\n", "\r\n")) == parse_diff(_DIFF)
 
 
+def test_only_real_line_ends_split_a_diff() -> None:
+    # Form feeds and Unicode line separators are file content to git; read as line ends they
+    # would turn content into fake diff lines — here a fabricated file and a phantom deletion.
+    diff = (
+        "diff --git a/f.js b/f.js\n--- a/f.js\n+++ b/f.js\n@@ -1 +1 @@\n"
+        "-old\n+s = 'a\u2028diff --git a/evil b/evil'\n+p\x0c-x\x85-y\n"
+    )
+    assert parse_diff(diff) == (DiffEntry("f.js", "M", 2, 1),)
+
+
+def test_a_type_change_counts_as_one_file() -> None:
+    # git shows a file replaced by a symlink as a deletion and an addition of the same path.
+    diff = (
+        "diff --git a/cfg b/cfg\ndeleted file mode 100644\n--- a/cfg\n+++ /dev/null\n"
+        "@@ -1 +0,0 @@\n-x\n"
+        "diff --git a/cfg b/cfg\nnew file mode 120000\n--- /dev/null\n+++ b/cfg\n"
+        "@@ -0,0 +1 @@\n+target\n"
+    )
+    entries = parse_diff(diff)
+    assert [entry.kind for entry in entries] == ["D", "A"]
+    header = render_overview([_section(entries)], diff_size=0).splitlines()[0]
+    assert "— 1 file, +1 −1," in header
+
+
 def test_total_counts_sums_the_entries() -> None:
     assert total_counts(parse_diff(_DIFF)) == (5, 5)
     assert total_counts(()) == (0, 0)

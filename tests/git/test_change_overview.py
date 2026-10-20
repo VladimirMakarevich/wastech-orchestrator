@@ -246,9 +246,62 @@ def test_a_base_that_does_not_resolve_writes_nothing(
     first = gm.write_current_diff("task-001")
     before = (Path(first.diff_path).read_bytes(), Path(first.overview_path).read_bytes())
     _write(git_repo.clone / "b.py", "b = 1\n")
-    store.set_gate_reference("task-001", "f" * 40)
+    store.set_base_ref("task-001", "f" * 40)
     with pytest.raises(GitCommandError):
         gm.write_current_diff("task-001")
     assert (Path(first.diff_path).read_bytes(), Path(first.overview_path).read_bytes()) == before
     # Nothing was left staged by an intent-to-add that never got its reset.
     assert git_run(["diff", "--cached", "--name-only"], git_repo.clone) == ""
+
+
+def test_a_gate_reference_the_clone_lacks_drops_only_the_second_section(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The gate reference feeds only the optional section; a recorded commit this clone does not
+    # hold (a re-created clone under a surviving state.db) must not fail the node that just edited.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    _write(git_repo.clone / "a.py", "a = 1\n")
+    store.set_gate_reference("task-001", "f" * 40)
+    written = gm.write_current_diff("task-001")
+    overview = _overview(written)
+    assert overview.startswith(f"{TASK_BASE_TITLE} {written.base_sha} — 1 file, +1 −0")
+    assert LAST_COMMIT_TITLE not in overview
+    assert "a.py" in Path(written.diff_path).read_text(encoding="utf-8")
+
+
+def test_the_operators_git_diff_config_does_not_change_what_is_parsed(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The orchestrator parses the diffs it writes, so their shape is pinned: forced color would
+    # wrap every line in escapes and mnemonic prefixes would turn `a/x` into `c/x`.
+    _fixture_tree(git_repo, git_run)
+    git_run(["config", "color.diff", "always"], git_repo.clone)
+    git_run(["config", "diff.mnemonicPrefix", "true"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    _edit_tree(git_repo.clone)
+    written = gm.write_current_diff("task-001")
+    assert Path(written.diff_path).read_bytes() == _PINNED_DIFF.replace("\n", os.linesep).encode()
+    assert "M  mod.txt  +2  −1" in _overview(written)
+
+
+def test_a_denied_directory_pattern_marks_everything_under_it(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    from dataclasses import replace
+
+    store.insert_task(TaskRow(task_id="task-001", title="t", status=Status.NEW))
+    config = make_git_config(git_repo.clone)
+    config = replace(
+        config, security=replace(config.security, denied_read_paths=(" config/private ",))
+    )
+    gm = GitManager(
+        config, store=store, artifacts_root=str(tmp_path / "art"), gh_runner=_offline_gh
+    )
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    _write(git_repo.clone / "config" / "private" / "keys.yaml", "k: v\n")
+    _write(git_repo.clone / "config" / "public.yaml", "p: v\n")
+    overview = _overview(gm.write_current_diff("task-001"))
+    assert "A  config/private/keys.yaml  +1  −0  [denied]" in overview
+    assert "A  config/public.yaml  +1  −0\n" in overview

@@ -29,7 +29,7 @@ from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
     evaluate_diff_gate,
 )
-from wastech_orchestrator.core.flow.change_guidance import change_guidance
+from wastech_orchestrator.core.flow.change_guidance import change_guidance_for
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
@@ -416,25 +416,17 @@ class AgentNodeRunner:
             git_evidence=self._has_git_evidence(node),
         )
 
-    def _change_guidance(
-        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> str | None:
-        """Where this node should start on the change, or ``None`` before there is one.
+    def _always_has_shell(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> bool:
+        """True iff this attempt gets a shell on **every** provider its route may land on.
 
-        Asks whether **every** provider on the route grants a shell — not
-        :meth:`_can_run_commands`, which fails toward "yes" because it guards detection — so the
-        node is sent to inspect files with commands only when it is sure to be able to.
+        Not :meth:`_can_run_commands`, which fails toward "yes" because it guards detection: this
+        one decides whether the node is told to inspect the change with commands, so it is "yes"
+        only when the node is sure to be able to.
         """
-        if self._in.change_overview_path is None or self._in.diff_base is None:
-            return None
-        return change_guidance(
-            base_sha=self._in.diff_base,
-            has_shell=self._s.router.route_always_grants_shell(
-                route,
-                permission_profile=node.permission_profile or ctx.snapshot.doc.permission_ceiling,
-                git_evidence=self._has_git_evidence(node),
-            ),
-            decomposed=ctx.subtask_order is not None,
+        return self._s.router.route_always_grants_shell(
+            route,
+            permission_profile=node.permission_profile or ctx.snapshot.doc.permission_ceiling,
+            git_evidence=self._has_git_evidence(node),
         )
 
     def _granted_shell_before(
@@ -898,7 +890,9 @@ class AgentNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
-            change_guidance=self._change_guidance(node, ctx, route),
+            change_guidance=change_guidance_for(
+                self._in, ctx, always_has_shell=lambda: self._always_has_shell(node, ctx, route)
+            ),
             # The repository's own harness skills this node must invoke, and whether it may invoke
             # any at all. Names go to the neutral seam as a Core-built prompt block (never through
             # the role renderer, which stays path-only); the resolved switch decides whether each
