@@ -42,3 +42,4 @@ Built one document at a time: the foundational documents first, the implementati
 - 2026-10-19 — spec folder scaffolded.
 - 2026-10-19 — problem, requirements, out-of-scope, happy path, design, acceptance criteria, definition of done signed off; Q-1/Q-2 resolved by D-5/D-6; plan drafted (six phases).
 - 2026-10-19 — plan signed off; status ready-to-implement.
+- 2026-10-20 — phases 01–06 implemented on `feat/agent-diff-handoff`, one commit per phase; the real-run half of AC-N4 remains a follow-up after merge.

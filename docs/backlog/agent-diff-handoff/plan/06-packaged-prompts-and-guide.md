@@ -1,6 +1,6 @@
 # Phase 06 — Packaged prompts and guide
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** 05
 - **Delivers:** the packaged flows use the new hand-off: the `implementation` roles start from the overview (review), from findings (fixing) and from per-file diffs (documentation); the content critics say explicitly that they read the whole change; the operator guide explains it; one fake-CLI run proves the end-to-end prompt.
 
