@@ -65,6 +65,15 @@ class _FakeRouter:
         override = getattr(self, "grants_shell", None)
         return git_evidence if override is None else bool(override)
 
+    def route_always_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # Every route this double resolves has one provider, so "every provider on it" and "any
+        # provider on it" are the same question.
+        return self.route_grants_shell(
+            route, permission_profile=permission_profile, git_evidence=git_evidence
+        )
+
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         self.route_overrides[node_id] = override
         return ResolvedRoute(

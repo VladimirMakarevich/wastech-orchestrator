@@ -1,6 +1,6 @@
 # Phase 02 — Every-provider shell check
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none
 - **Delivers:** a provider-neutral answer to "will this attempt have a shell on whichever provider serves it", fail-closed toward **no**.
 

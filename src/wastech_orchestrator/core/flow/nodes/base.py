@@ -160,11 +160,19 @@ class RouterPort(Protocol):
     per-attempt fact the Git-control detection brackets key on. It belongs to the Router because
     only the adapters can answer it (and both ends of a route must be asked), and to this protocol
     because a runner must be able to ask before it builds a request.
+
+    ``route_always_grants_shell`` is the opposite question with the opposite default — whether
+    *every* provider on the route gives the attempt a shell, unknown counting as no — and decides
+    whether a node may be told to inspect the change with commands.
     """
 
     def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
 
     def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool: ...
+
+    def route_always_grants_shell(
         self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
     ) -> bool: ...
 

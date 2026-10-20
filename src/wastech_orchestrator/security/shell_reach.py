@@ -73,3 +73,31 @@ def any_provider_grants_shell(
         if check(provider_cfg, query):
             return True
     return False
+
+
+def every_provider_grants_shell(
+    providers: Iterable[ProviderId],
+    configs: Mapping[ProviderId, ProviderConfig],
+    checks: Mapping[ProviderId, ShellCheck],
+    query: ShellQuery,
+) -> bool:
+    """True only when **every** one of *providers* would give this attempt a shell (offline).
+
+    The opposite question to :func:`any_provider_grants_shell`, with the opposite default, because
+    a wrong answer costs the opposite thing. That one guards detection, where an unwatched attempt
+    is the worse error; this one decides whether a node may be *told* to inspect the change with
+    commands, and telling a node to run a command it cannot run sends it off to fail at a tool
+    call. So the answer is ``True`` only when it is known for every provider the attempt may land
+    on — a route's primary and its fallback alike, since the instruction is written once, before it
+    is known which one serves it — and an empty list, a missing config block or an unbound check
+    all answer ``False``.
+    """
+    provider_ids = list(providers)
+    if not provider_ids:
+        return False
+    for provider_id in provider_ids:
+        provider_cfg = configs.get(provider_id)
+        check = checks.get(provider_id)
+        if provider_cfg is None or check is None or not check(provider_cfg, query):
+            return False
+    return True

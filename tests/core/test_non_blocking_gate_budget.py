@@ -58,6 +58,9 @@ class _GatingRouter:
     def route_grants_shell(self, route: ResolvedRoute, **_kwargs: Any) -> bool:
         return False
 
+    def route_always_grants_shell(self, route: ResolvedRoute, **_kwargs: Any) -> bool:
+        return False
+
     def run_stage(self, request: Any, route: ResolvedRoute, *, snapshot: Any = None) -> Any:
         result = AgentRunResult(
             status=RunStatus.SUCCEEDED,
