@@ -28,13 +28,13 @@ pull-request body when the oversight layer produces no prose, or does not run at
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_facts, read_final_diff
+from wastech_orchestrator.diff_overview import parse_diff, total_counts
 from wastech_orchestrator.ledger import INFRA_LOOP, Ledger
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
@@ -76,13 +76,6 @@ _OBSERVATIONS_MAX = 8_000
 
 _ELLIPSIS = "…"
 _OBSERVATIONS_TRUNCATED = "(older observations dropped — digest bound reached)"
-
-# A unified diff's header lines. ``+++ b/<path>`` carries the path literally (spaces included), so
-# it is preferred over the ambiguous ``diff --git`` line — the same reasoning the packaged check
-# tools use. Both are read ONLY between a ``diff --git`` line and the file's first ``@@`` hunk
-# header: an unanchored match would read a deleted body line like ``--- x`` as a file header.
-_DIFF_OLD_PATH_RE = re.compile(r"^--- a/(.*)$")
-_DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
 
 
 def _bounded(text: str, limit: int) -> str:
@@ -321,35 +314,14 @@ def summarize_diff(diff_text: str) -> DiffSummary:
     Derived from the ``current.diff`` **artifact** rather than from a live ``git diff --stat``: a
     fresh git invocation reads the working tree, which is not durable state, so it would break the
     pure-function contract the reproducibility criterion rests on — for the packet and equally for
-    the committed report rendered from the same facts.
+    the committed report rendered from the same facts. A fold over
+    :func:`~wastech_orchestrator.diff_overview.parse_diff`, the parser the change overview handed to
+    agents is rendered from, so the pull request and the overview cannot disagree about one diff.
     """
-    paths: list[str] = []
-    insertions = 0
-    deletions = 0
-    in_header = False
-    old_path: str | None = None
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            in_header, old_path = True, None
-            continue
-        if in_header:
-            if line.startswith("--- "):
-                match = _DIFF_OLD_PATH_RE.match(line)
-                old_path = match.group(1).strip() if match else None
-            elif line.startswith("+++ "):
-                match = _DIFF_NEW_PATH_RE.match(line)
-                # ``+++ /dev/null`` is a deletion: the file it names is on the ``---`` line.
-                path = match.group(1).strip() if match else old_path
-                if path and path not in paths:
-                    paths.append(path)
-            elif line.startswith("@@"):
-                in_header = False
-            continue
-        if line.startswith("+"):
-            insertions += 1
-        elif line.startswith("-"):
-            deletions += 1
-    return DiffSummary(paths=tuple(paths), insertions=insertions, deletions=deletions)
+    entries = parse_diff(diff_text)
+    insertions, deletions = total_counts(entries)
+    paths = tuple(dict.fromkeys(entry.path for entry in entries))
+    return DiffSummary(paths=paths, insertions=insertions, deletions=deletions)
 
 
 def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:

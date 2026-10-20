@@ -17,6 +17,7 @@ from wastech_orchestrator.core.supervisor_packet import (
     split_check_runs,
     summarize_diff,
 )
+from wastech_orchestrator.diff_overview import parse_diff
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDOUT_FILENAME,
@@ -329,6 +330,18 @@ def test_summarize_diff_counts_paths_and_lines(tmp_path: Path) -> None:
 def test_summarize_diff_of_nothing_is_empty(tmp_path: Path) -> None:
     summary = summarize_diff("")
     assert summary.paths == () and summary.insertions == 0 and summary.deletions == 0
+
+
+def test_summarize_diff_is_a_fold_over_the_shared_parser() -> None:
+    # The change overview handed to agents is rendered from `parse_diff`; the PR body's stat must
+    # describe the same change, so its totals are the parser's, not a second reading of the text.
+    entries = parse_diff(_DIFF)
+    summary = summarize_diff(_DIFF)
+    assert summary.paths == tuple(entry.path for entry in entries)
+    assert (summary.insertions, summary.deletions) == (
+        sum(entry.added for entry in entries),
+        sum(entry.removed for entry in entries),
+    )
 
 
 def test_split_check_runs_keeps_skipped_out_of_failed(tmp_path: Path) -> None:

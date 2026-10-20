@@ -10,7 +10,7 @@ Bottom-up, so every phase lands inert until the one that wires it in. The pure p
 
 | # | Phase | Delivers | Depends on | Status |
 | --- | --- | --- | --- | --- |
-| 01 | [Diff overview parser](01-diff-overview-parser.md) | `diff_overview.py`: per-file parse + bounded render; `summarize_diff` delegates, PR body unchanged | — | ☐ |
+| 01 | [Diff overview parser](01-diff-overview-parser.md) | `diff_overview.py`: per-file parse + bounded render; `summarize_diff` delegates, PR body unchanged | — | ☑ |
 | 02 | [Every-provider shell check](02-every-provider-shell-check.md) | `every_provider_grants_shell` + `AgentRouter.route_always_grants_shell` | — | ☐ |
 | 03 | [Git Manager writes the overview](03-git-manager-overview.md) | `change-overview.txt` beside `current.diff`: full-SHA base, since-last-commit section, `[denied]`, redaction | 01 | ☐ |
 | 04 | [Request fields and footer](04-request-fields-and-footer.md) | `AgentRunRequest` fields, footer rendering, containment, `request.json`, partial-diff clearing in the router | — | ☐ |

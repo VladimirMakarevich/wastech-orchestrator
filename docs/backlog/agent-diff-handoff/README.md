@@ -4,7 +4,7 @@
 
 # Agent diff hand-off
 
-Status: **ready-to-implement** Date: 2026-10-19 Owner: Vladimir Makarevich Slug: `agent-diff-handoff`
+Status: **in-progress** Date: 2026-10-19 Owner: Vladimir Makarevich Slug: `agent-diff-handoff`
 
 <!-- Status: draft → shaping → ready-to-implement → in-progress → done. Same one-line header the
      other queue documents carry. -->
