@@ -1,6 +1,6 @@
 # Phase 04 — Request fields and footer
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none
 - **Delivers:** the provider-side half of D-4 and D-7 — a request can carry the overview, the base and the guidance sentence, the footer renders them, containment and `request.json` cover them, and a partial-diff fallback clears them. Nothing sets them yet.
 

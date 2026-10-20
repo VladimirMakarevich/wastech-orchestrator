@@ -720,8 +720,9 @@ class AgentRouter:
         from_provider: ProviderId | None = None,
         to_provider: ProviderId | None = None,
     ) -> AgentRunRequest:
-        """Per-attempt request. The fallback gets the partial diff; the permission profile is never
-        relaxed (``permission_profile`` is intentionally left untouched).
+        """Per-attempt request. The fallback gets the partial diff, without the change overview, its
+        base or the guidance that describe the full one; the permission profile is never relaxed
+        (``permission_profile`` is intentionally left untouched).
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
         provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
@@ -735,7 +736,15 @@ class AgentRouter:
         """
         req = replace(request, attempt=attempt)
         if partial is not None:
-            req = replace(req, diff_path=partial.diff_path)
+            # The overview, its base and the sentence pointing at them describe the change Core
+            # wrote, not this partial one; an attempt handed the partial diff gets it alone.
+            req = replace(
+                req,
+                diff_path=partial.diff_path,
+                change_overview_path=None,
+                diff_base=None,
+                change_guidance=None,
+            )
         if from_provider is not None and to_provider is not None and from_provider != to_provider:
             req = replace(
                 req,

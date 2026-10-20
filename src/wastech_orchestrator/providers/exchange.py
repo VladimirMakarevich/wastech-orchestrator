@@ -399,6 +399,7 @@ def assert_orchestration_paths_contained(
             ("task_path", request.task_path),
             ("plan_path", request.plan_path),
             ("diff_path", request.diff_path),
+            ("change_overview_path", request.change_overview_path),
             ("check_artifacts_path", request.check_artifacts_path),
             ("review_artifacts_path", request.review_artifacts_path),
             ("human_input_path", request.human_input_path),
