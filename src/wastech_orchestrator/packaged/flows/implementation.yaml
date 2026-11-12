@@ -57,7 +57,7 @@ flow:
       when: { fact: derived.needs_refinement }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -71,7 +71,7 @@ flow:
       hitl: { allow_question: true, allow_approval: true }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -87,7 +87,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.5
+      # model: gpt-6-sol
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -104,7 +104,7 @@ flow:
       permission_profile: read-only
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # network_access: false
       # blocking: true
@@ -122,7 +122,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.5
+      # model: gpt-6-sol
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -151,7 +151,7 @@ flow:
       network_access: false
       # other optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # timeout_seconds: 7200
       # extra_args: []
     - id: publish

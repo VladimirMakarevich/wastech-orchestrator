@@ -103,7 +103,7 @@ agents:
   providers:
     claude:
       command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
-      model: "claude-sonnet-5"   # "" = use the Claude CLI/account default
+      model: "claude-sonnet-5-5" # "" = use the Claude CLI/account default
       reasoning: high          # low | medium | high | xhigh | max
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
@@ -116,7 +116,7 @@ agents:
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
     codex:
       command: "codex"        # executable name (found on PATH) or an absolute path to the CLI
-      model: "gpt-5.5"         # "" = use the Codex CLI/account default
+      model: "gpt-6-sol"       # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       permission_profile: "workspace-write"   # read-only | workspace-write — codex's isolation knob:
@@ -455,13 +455,13 @@ supervisor:                         # oversight layer above any flow (not a node
     mode: events                    # all | selected | events | none — see the table below
     triggers: [rework, failure, fallback]  # which deviations count under `events` (this is the full set)
     include_nodes: []               # node ids observed under `mode: selected`; ignored otherwise
-    model: "claude-sonnet-5"        # null = the resolved provider's default model
+    model: "claude-sonnet-5-5"      # null = the resolved provider's default model
     reasoning: low                  # null = the resolved provider's default reasoning
   finalize:                         # the whole-task synthesis — writes summary.md (the PR body)
-    model: "claude-sonnet-5"        # worth more than `observe`: most readers of a long run see only this
+    model: "claude-sonnet-5-5"      # worth more than `observe`: most readers of a long run see only this
     reasoning: medium
   handoff:                          # the subtask brief between regions of a decomposed task
-    model: "claude-sonnet-5"
+    model: "claude-sonnet-5-5"
     reasoning: medium
   # `observe.mode` is what this layer costs, ranked by how many calls it can make:
   #   none      — never observe. `finalize` and the summary still happen: that turn is seeded by a

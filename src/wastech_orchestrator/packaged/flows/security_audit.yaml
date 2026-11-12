@@ -38,7 +38,7 @@ flow:
       hitl: { allow_question: true, allow_approval: false }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -51,7 +51,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -67,7 +67,7 @@ flow:
       network_access: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: xhigh
       # timeout_seconds: 7200
       # network_access: true
@@ -87,7 +87,7 @@ flow:
       gate_severity: medium
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # network_access: true
     - id: report
@@ -102,7 +102,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: medium
       # timeout_seconds: 7200
       # extra_args: []
