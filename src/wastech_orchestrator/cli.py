@@ -1354,7 +1354,11 @@ def _daemon_alive(config: OrchestratorConfig) -> bool:
 
 
 def _runner_alive(config: OrchestratorConfig) -> bool:
-    """Read-only: is a ``worc run`` executor working in this worc home (marker present + alive)?"""
+    """Read-only: is a non-daemon executor working in this worc home (marker present + alive)?
+
+    The marker is held by ``run``, ``rerun`` and a single-pass ``watch`` — the executors that have
+    no cooperative stop, which is why they share one file apart from the daemon's PID file.
+    """
     return (
         process_control.running_daemon_pid(process_control.runner_file_path(worc_home_for(config)))
         is not None
@@ -1362,26 +1366,28 @@ def _runner_alive(config: OrchestratorConfig) -> bool:
 
 
 def _executor_alive(config: OrchestratorConfig) -> bool:
-    """Read-only: is ANY executor live for this worc home — the watch daemon **or** a ``worc run``?
+    """Read-only: is ANY executor live for this worc home — the watch daemon **or** a ``run``,
+    ``rerun`` or single-pass ``watch``?
 
     The question every liveness probe actually means, and for a long time only half of it was
-    asked: ``run`` is a first-class entry point that recorded nothing about itself, so a task it was
-    executing read as ``parked (no daemon)`` for its whole duration — which is not merely a wrong
-    label but the exact prompt that sends an operator to ``rerun --continue``.
+    asked: ``run`` (and later the single-pass ``watch``) recorded nothing about itself, so a task it
+    was executing read as ``parked (no daemon)`` for its whole duration — which is not merely a
+    wrong label but the exact prompt that sends an operator to ``rerun --continue``.
     """
     return _daemon_alive(config) or _runner_alive(config)
 
 
 def _runner_owner_note(pid: int) -> str:
-    """How to get a live ``run`` executor out of the way — it can only be waited out.
+    """How to get a live non-daemon executor out of the way — it can only be waited out.
 
-    ``run`` installs no stop wiring, so the only honest instruction is to wait for it to finish or
-    interrupt it where it runs. Shared by the pre-flight owner check and the exclusive claim that
-    backs it up, so an operator reads one sentence whichever of the two refused.
+    ``run``, ``rerun`` and a single-pass ``watch`` install no stop wiring, so the only honest
+    instruction is to wait for it to finish or interrupt it where it runs. Shared by the pre-flight
+    owner check and the exclusive claim that backs it up, so an operator reads one sentence
+    whichever of the two refused.
     """
     return (
-        f"a 'run' or 'rerun' is executing a task in this clone (pid {pid}); wait for it to "
-        "finish, or interrupt it where it runs"
+        f"a 'run', 'rerun' or single-pass 'watch' is executing in this clone (pid {pid}); wait "
+        "for it to finish, or interrupt it where it runs"
     )
 
 
@@ -1455,8 +1461,9 @@ def _parked_slot_note(config: OrchestratorConfig) -> str | None:
     )
     if runner is not None:
         return (
-            f"stop: note: a 'run' is executing a task in this clone (pid {runner}); the stop "
-            "ladder does not reach it — wait for it to finish, or interrupt it where it runs"
+            f"stop: note: a 'run', 'rerun' or single-pass 'watch' is executing in this clone "
+            f"(pid {runner}); the stop ladder does not reach it — wait for it to finish, or "
+            "interrupt it where it runs"
         )
     db_path = Path(worc_home_for(config)) / "state.db"
     if not db_path.is_file():
@@ -3924,10 +3931,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
     children_path = process_control.children_file_path(worc_home_for(config))
     cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled
 
-    # Single pass: no PID file, no signal handler, no stop wiring — and NO agent-handle recorder, so
-    # it never clobbers a concurrent daemon's children file. A hung single-pass agent is still
-    # reaped by run_process's own timeout/Ctrl-C subtree-kill.
+    # Single pass: no daemon PID file, no signal handler, no stop wiring — and NO agent-handle
+    # recorder, so it never clobbers a concurrent daemon's children file. A hung single-pass agent
+    # is still reaped by run_process's own timeout/Ctrl-C subtree-kill. It IS an executor for as
+    # long as it runs, though, so it is one exactly the way `run` is: refused in a busy clone, and
+    # holding the runner marker so the liveness probe reads its task as `running` and every other
+    # executor refuses. The runner marker, not the daemon's: `stop` cannot ask it to finish.
     if poll <= 0:
+        owner = _executor_owner(config)
+        if owner is not None:
+            print(f"watch: {owner}")
+            return 1
         orchestrator = build_orchestrator(
             config,
             layout=layout_for(config),
@@ -3935,8 +3949,16 @@ def cmd_watch(args: argparse.Namespace) -> int:
             heartbeat_seconds=args.heartbeat_seconds,
         )
         notes = WatchNotes()
-        return _summarize_watch(
-            watch_loop(
+        runner_path = process_control.runner_file_path(worc_home_for(config))
+        try:
+            # An exclusive claim, as in `run`: the owner check above is separated from here by the
+            # engine build, and the kernel decides a race inside that window.
+            process_control.write_pid_file(runner_path, exclusive=True)
+        except process_control.ExecutorBusyError as busy:
+            print(f"watch: {_runner_owner_note(busy.pid)}")
+            return 1
+        try:
+            single_pass = watch_loop(
                 orchestrator,
                 config,
                 folder,
@@ -3944,9 +3966,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 queue=args.queue,
                 cleanup_hook=cleanup_hook,
                 notes=notes,
-            ),
-            withheld=notes.withheld,
-        )
+            )
+        finally:
+            runner_path.unlink(missing_ok=True)
+        return _summarize_watch(single_pass, withheld=notes.withheld)
 
     # Daemon: refuse a second watcher for the same artifact root. A stale PID file (process gone) is
     # overwritten on start.
@@ -3954,16 +3977,14 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if existing is not None:
         print(_watcher_busy_note(existing, pid_path))
         return 1
-    # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
-    # covered by the PID file above and cannot be stopped by the advice that goes with it.
+    # A `run`, `rerun` or single-pass `watch` holds the same single slot in the same clone, and none
+    # of them is a daemon — so they are not covered by the PID file above and cannot be stopped by
+    # the advice that goes with it.
     runner = process_control.running_daemon_pid(
         process_control.runner_file_path(worc_home_for(config))
     )
     if runner is not None:
-        print(
-            f"watch: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
-            "finish, or interrupt it where it runs"
-        )
+        print(f"watch: {_runner_owner_note(runner)}")
         return 1
 
     controller = process_control.StopController()  # SIGTERM -> event, restored on exit

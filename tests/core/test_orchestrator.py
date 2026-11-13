@@ -7139,3 +7139,143 @@ def test_a_successful_terminal_says_what_it_kept_and_how_to_reclaim_it(
     assert "worc logs clean" in text
     assert "logging.artifacts: minimal" in text
     assert "branch" not in text.split("this task's logs kept at")[1].split("\n")[0]
+
+
+# -- a successful task is finalized whatever its publishing policy ----------------------------
+
+_NO_GIT_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: {output_policy}
+  publishing: {publishing}
+  nodes:
+    - id: analysis
+      kind: agent
+      role_file: roles/analysis.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+{analysis_extra}    - id: publish
+      kind: publish
+      policy: {policy}
+  edges:
+    - {{ from: analysis, to: publish }}
+"""
+
+# (flow-level output_policy, flow-level publishing, publish-node policy, analysis node extra)
+_NO_GIT_POLICIES = {
+    "none": ("code_change", "none", "none", ""),
+    "local_artifact": ("code_change", "local_artifact", "local_artifact", ""),
+    "private_control_workspace_report": (
+        "private_control_workspace_report",
+        "none",
+        "private_control_workspace_report",
+        "      output_artifact: report\n",
+    ),
+}
+
+
+def _all_refs_count(clone: Path) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", "rev-list", "--all", "--count"],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("policy", sorted(_NO_GIT_POLICIES))
+def test_a_successful_no_git_task_is_finalized(
+    git_repo, make_git_config, tmp_path: Path, policy: str
+) -> None:
+    # worc-connect's `issue_triage` ran to `done` and its file stayed in `tasks/pending/`, listed as
+    # queued and done at once, with no summary beside it: finalize ran only on the PR path. A no-git
+    # policy now finalizes too — and stays no-git: nothing committed, pushed or opened.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    output_policy, publishing, node_policy, extra = _NO_GIT_POLICIES[policy]
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "analysis.md").write_text("Analyse {task_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(
+        _NO_GIT_FLOW.format(
+            output_policy=output_policy,
+            publishing=publishing,
+            policy=node_policy,
+            analysis_extra=extra,
+        ),
+        "utf-8",
+    )
+    gh_calls: list[Sequence[str]] = []
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        gh_calls.append(argv)
+        return _fake_gh()(argv)
+
+    orch, store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(outputs={"analysis": ("# Report\n\nverdict: fine\n", None)}),
+        check_verdicts=[0],
+        gh=gh,
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    commits_before = _all_refs_count(git_repo.clone)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-nogit"))
+
+    assert result.final_status is Status.DONE, result
+    assert result.pr_url is None
+    assert (tmp_path / "done" / "task-nogit.md").exists()
+    assert not (tmp_path / "task-nogit.md").exists()
+    summary = tmp_path / "done" / "task-nogit.summary.md"
+    assert summary.exists() and summary.read_text("utf-8").strip()
+    row = store.get_task("task-nogit")
+    assert row is not None and row.source_path == str(tmp_path / "done" / "task-nogit.md")
+    assert _all_refs_count(git_repo.clone) == commits_before  # no audit commit, nothing pushed
+    assert gh_calls == []  # no PR
+
+
+def test_a_task_whose_publish_node_is_disabled_is_still_finalized(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A skipped publish terminal ends the flow DONE without calling the finalize hook either.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "analysis.md").write_text("Analyse {task_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(
+        _NO_GIT_FLOW.format(
+            output_policy="code_change",
+            publishing="pull_request",
+            policy="pull_request",
+            analysis_extra="",
+        ),
+        "utf-8",
+    )
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(outputs={"analysis": ("done", None)}),
+        check_verdicts=[0],
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    commits_before = _all_refs_count(git_repo.clone)
+
+    result = orch.run_task(
+        _complete_task(
+            tmp_path, "task-skip", front_extra="nodes:\n  publish:\n    enabled: false\n"
+        )
+    )
+
+    assert result.final_status is Status.DONE, result
+    assert (tmp_path / "done" / "task-skip.md").exists()
+    assert (tmp_path / "done" / "task-skip.summary.md").exists()
+    assert _all_refs_count(git_repo.clone) == commits_before

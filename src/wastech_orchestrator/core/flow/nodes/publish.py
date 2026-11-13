@@ -14,7 +14,9 @@ report directory, so the existing scoped staging commits only those docs.
 control workspace and touches git not at all — it fails closed if that report would be git-trackable
 (so it can never enter staging/a commit/a PR), leaving the target repo byte-for-byte. ``none`` /
 ``local_artifact`` write no git either (the deliverable is the in-workspace artifact). Task finalize
-(moving the task file before the audit commit) and auto-merge stay orchestrator-level.
+and auto-merge stay orchestrator-level: the PR path calls the finalize hook here, because the task
+file has to move before the audit commit records it; the no-git policies have no commit to order
+against, so the orchestrator finalizes them once the flow has ended (``_finish_engine_run``).
 """
 
 from __future__ import annotations
@@ -214,6 +216,7 @@ class PublishNodeRunner:
             return self._store_private_report(ctx)
         if node.policy not in _PR_POLICIES:
             # none / local_artifact: the deliverable is the in-workspace artifact; git is untouched.
+            # Finalize (task-file move + summary) runs orchestrator-side after the flow ends.
             return None
         git = self._s.git
         if git is None or self._in.branch is None:

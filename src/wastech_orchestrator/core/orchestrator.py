@@ -931,6 +931,11 @@ class _Pipeline:
     #: failure report in this process. The ledger reads it rather than the task row's report path,
     #: which a ``rerun --continue`` keeps pointing at the previous attempt's report.
     stop: _StopFacts | None = None
+    #: Whether the task finalize (whole-task summary, task-file move, ``<id>.summary.md``) ran in
+    #: this process. The PR publish path runs it inside the publish node, before the audit commit;
+    #: every other successful end — a no-git publishing policy, a disabled publish node, a terminal
+    #: that is not a publish node — leaves it to ``_finish_engine_run``, which reads this flag.
+    finalized: bool = False
 
 
 class Eligibility(StrEnum):
@@ -3515,7 +3520,7 @@ class Orchestrator:
                 terminal_reason=str(exc),
             )
         self._sync_counters_from_run_state(p, run_state)
-        return self._finish_engine_run(p, result)
+        return self._finish_engine_run(p, result, inputs)
 
     def _dispatch_infra_exhaustion(
         self,
@@ -3993,6 +3998,7 @@ class Orchestrator:
         The transitions below are logged (with elapsed time on the supervisor synthesis) so the
         end-of-run tail is never a silent window: the whole-task summary can take minutes of
         context assembly + one LLM call, and without a heartbeat that looked like a hang."""
+        p.finalized = True
         log = self._log(p.task.id)
         log.info("task finalize: starting (whole-task summary, then publish prep)")
         degraded = False
@@ -4559,9 +4565,23 @@ class Orchestrator:
             ]
         )
 
-    def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
-        """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
+    def _finish_engine_run(
+        self, p: _Pipeline, result: FlowRunResult, inputs: NodeInputs
+    ) -> PipelineResult:
+        """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge).
+
+        A successful task is always finalized — its file filed in ``tasks/done/`` with its
+        ``<id>.summary.md`` beside it — whatever its publishing policy. The PR path does that inside
+        the publish node, because the move has to land in the audit commit. Every other successful
+        end reaches here without it: a ``none`` / ``local_artifact`` /
+        ``private_control_workspace_report`` publish, a publish node disabled for the task, or a
+        flow whose terminal is not a publish node. Those touch no git, so there is no commit to get
+        ahead of and they finalize now, after the deliverable is stored. The move stays clear of
+        terminal cleanup's dirty-tree check, which never counts the lifecycle tree.
+        """
         if result.status is Status.DONE:
+            if not p.finalized:
+                self._engine_finalize(p, inputs)
             pr_url = self._git.recorded_pr_url(p.task.id)
             if pr_url and self._auto_merge_on(p.task):
                 # A skipped check (toolchain absent) means the quality gate did not fully run — an
