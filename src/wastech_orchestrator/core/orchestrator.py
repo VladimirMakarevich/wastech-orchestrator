@@ -4575,13 +4575,13 @@ class Orchestrator:
         the publish node, because the move has to land in the audit commit. Every other successful
         end reaches here without it: a ``none`` / ``local_artifact`` /
         ``private_control_workspace_report`` publish, a publish node disabled for the task, or a
-        flow whose terminal is not a publish node. Those touch no git, so there is no commit to get
-        ahead of and they finalize now, after the deliverable is stored. The move stays clear of
-        terminal cleanup's dirty-tree check, which never counts the lifecycle tree.
+        flow whose terminal is not a publish node. Those have no commit to get ahead of, so their
+        finalize is handed to :meth:`_go_terminal`, which runs it only once terminal cleanup has
+        confirmed the task really ends ``done`` — a skipped PR publish over uncommitted work is
+        downgraded there to ``manual_action_required``, and must not first be filed as a success.
         """
         if result.status is Status.DONE:
-            if not p.finalized:
-                self._engine_finalize(p, inputs)
+            late = None if self._already_finalized(p) else (lambda: self._late_finalize(p, inputs))
             pr_url = self._git.recorded_pr_url(p.task.id)
             if pr_url and self._auto_merge_on(p.task):
                 # A skipped check (toolchain absent) means the quality gate did not fully run — an
@@ -4591,9 +4591,13 @@ class Orchestrator:
                         "[AUTO-MERGE] skipped: a check was skipped (toolchain absent) — the gate "
                         "is incomplete; leaving the PR open for human review"
                     )
-                    return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
+                    return self._go_terminal(
+                        p, Status.DONE, pr_url=pr_url, already_moved=True, late_finalize=late
+                    )
                 return self._auto_merge(p, pr_url)
-            return self._go_terminal(p, Status.DONE, pr_url=pr_url, already_moved=True)
+            return self._go_terminal(
+                p, Status.DONE, pr_url=pr_url, already_moved=True, late_finalize=late
+            )
         if result.status is Status.MANUAL_ACTION_REQUIRED:
             # The engine's recorder wrote this stop's failure report; the ledger names it from here.
             p.stop = _StopFacts(
@@ -4603,6 +4607,38 @@ class Orchestrator:
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=result.limit_name or "stuck"
             )
         return self._fail(p, result.limit_name or "flow run failed")
+
+    def _already_finalized(self, p: _Pipeline) -> bool:
+        """Whether this task's finalize already ran — in this process, or in an earlier one.
+
+        The flag covers this process. A run that resumes past a PR publish node (a node after it
+        parked, then ``rerun --continue``) starts with the flag clear, so the durable sign is read
+        too: the task file already filed in ``tasks/done/`` with its ``<id>.summary.md`` beside it,
+        which is exactly what a completed finalize leaves. Finalizing again would cost a second
+        supervisor turn and append the task's follow-ups to the append-only file a second time.
+        """
+        if p.finalized:
+            return True
+        dest = lifecycle_destination(p.task_file, Status.DONE)
+        return (
+            dest is not None
+            and dest.exists()
+            and dest.with_name(f"{p.task.id}.summary.md").exists()
+        )
+
+    def _late_finalize(self, p: _Pipeline, inputs: NodeInputs) -> bool:
+        """Finalize a successful task that published no PR; return whether the file was filed.
+
+        Runs from :meth:`_go_terminal`, outside the engine, so nothing would route an error it
+        raises: the terminal is already decided and must still be recorded. A filesystem error is
+        logged and reported as "not filed", and the caller falls back to the plain move.
+        """
+        try:
+            self._engine_finalize(p, inputs)
+        except (GitCommandError, OSError) as exc:
+            self._log(p.task.id).error("task finalize failed", extra={"error": str(exc)})
+            return False
+        return True
 
     def _check_preflight(self, p: _Pipeline) -> None:
         """Normalize ``checks.command_sets`` onto the pipeline at task start (before any branch).
@@ -5113,12 +5149,19 @@ class Orchestrator:
         already_moved: bool = False,
         merge_outcome: str | None = None,
         mutation: ExchangeMutationManual | None = None,
+        late_finalize: Callable[[], bool] | None = None,
     ) -> PipelineResult:
         """Run terminal cleanup, set the final status, append exactly one ledger record.
 
         ``already_moved`` is set when the task file was moved + committed during finalize; the
         move is then complete on the task branch, so this must not re-move it on ``base_branch``
         after the cleanup checkout.
+
+        ``late_finalize`` is the finalize of a successful task that published no PR (see
+        ``_finish_engine_run``). It runs after cleanup, and only while the outcome is still
+        ``done``: a cleanup that downgrades the task leaves the file where a manual stop keeps it,
+        with the deterministic summary ``_explain_terminal`` writes for every non-``done`` end.
+        It returns whether the file was filed; when not, the plain move below files it.
         """
         final = status
         if self._exchange_active_unsafe(p.task.id):
@@ -5152,6 +5195,8 @@ class Orchestrator:
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED
+        if late_finalize is not None:
+            already_moved = late_finalize() if final is Status.DONE else False
         if status is not Status.DONE:
             # Deterministic short-term failure episode (no LLM); never long-term.
             self._record_failure_memory(p)

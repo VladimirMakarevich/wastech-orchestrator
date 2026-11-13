@@ -112,11 +112,14 @@ git merge --no-ff --no-edit main
 git push origin release                    # first: the branch
 git tag vX.Y.Z                             # aN / bN / rcN suffix ⇒ GitHub pre-release
 git push origin vX.Y.Z                     # then: the tag
-# then make the tag reachable from main and dev — merge commits both, never squash/rebase:
-gh pr create --base main --head release --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from main"
-gh pr merge --merge
-gh pr create --base dev --head main --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from dev"
-gh pr merge --merge
+# then make the tag reachable from main and dev — merge commits both, never squash/rebase.
+# Merge each PR by its URL: a bare `gh pr merge` picks the PR whose head is the CURRENT branch
+# (`release`), so the second merge would hit the first, already-merged PR and `dev` would never
+# reach the tag.
+url=$(gh pr create --base main --head release --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from main")
+gh pr merge "$url" --merge
+url=$(gh pr create --base dev --head main --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from dev")
+gh pr merge "$url" --merge
 ```
 
 **Why the back-merge is part of the release.** The package version comes from hatch-vcs, which reads the nearest tag **reachable from the commit being built**. A tag that sits only on `release` is invisible from `dev` and `main`, so a build from either reports a dev version of the last tag that happened to be reachable — once, `0.10.3a2.dev229` for a tree that already carried everything `v0.14.0a1` shipped — and any consumer that gates on worc's version refuses it. Merging `release` back after each tag keeps every code-branch build at or above the newest release it contains. Both merges are transitions the model already allows, `release` carries nothing `main` or `dev` must not have, and `site` is untouched, so the seal is unaffected. The alternatives were rejected: a tag names one commit, so the same tag cannot also be put on `main`; and a hatch-vcs fallback that reads the newest tag from elsewhere would report a version the built commit does not contain.
@@ -129,10 +132,10 @@ git checkout -b hotfix/<slug>
 # … fix + the gate … then PR into release and tag:
 gh pr create --base release && gh pr merge --squash --delete-branch
 git checkout release && git pull && git tag vX.Y.Z+1 && git push origin vX.Y.Z+1
-gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>"
-gh pr merge --merge                        # merge commit, as for dev → main
-gh pr create --base dev --head main --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>"
-gh pr merge --merge                        # the back-merge every tag gets
+url=$(gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>")
+gh pr merge "$url" --merge                 # merge commit, as for dev → main; by URL, see "Cut a release"
+url=$(gh pr create --base dev --head main --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>")
+gh pr merge "$url" --merge                 # the back-merge every tag gets
 ```
 
 **Port a fix out of `site` into `dev`** — cherry-pick, never a merge.

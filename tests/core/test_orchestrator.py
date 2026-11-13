@@ -7279,3 +7279,109 @@ def test_a_task_whose_publish_node_is_disabled_is_still_finalized(
     assert (tmp_path / "done" / "task-skip.md").exists()
     assert (tmp_path / "done" / "task-skip.summary.md").exists()
     assert _all_refs_count(git_repo.clone) == commits_before
+
+
+def test_a_skipped_pr_publish_over_uncommitted_work_is_not_filed_as_a_success(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The flow ends DONE with the PR publish disabled, but the agent left tracked changes nobody
+    # committed: terminal cleanup cannot restore base and downgrades the task to manual. The late
+    # finalize must not have run first — a manual stop keeps its file in place, and must not read
+    # as filed in `done/` with a success summary beside it.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "analysis.md").write_text("Implement {task_path}.", "utf-8")
+    flow = _NO_GIT_FLOW.format(
+        output_policy="code_change",
+        publishing="pull_request",
+        policy="pull_request",
+        analysis_extra="",
+    ).replace(
+        "      session_scope: fresh_disposable\n      permission_profile: read-only\n",
+        "      session_scope: editing_lineage\n      permission_profile: workspace-write\n",
+    )
+    (flows / "implementation.yaml").write_text(flow, "utf-8")
+    providers = _both(outputs={"analysis": ("done", None)})
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        (git_repo.clone / "README.md").write_text("changed\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    result = orch.run_task(
+        _complete_task(
+            tmp_path, "task-dirty", front_extra="nodes:\n  publish:\n    enabled: false\n"
+        )
+    )
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED, result
+    assert (tmp_path / "task-dirty.md").exists()  # kept in place, as every manual stop is
+    assert not (tmp_path / "done" / "task-dirty.md").exists()
+    assert not (tmp_path / "done" / "task-dirty.summary.md").exists()
+
+
+def test_a_task_already_filed_in_done_is_not_finalized_again(tmp_path: Path) -> None:
+    # A run that resumes past a PR publish node starts with the in-memory flag clear; the task file
+    # already filed beside its summary is the durable sign that finalize ran in an earlier process.
+    from types import SimpleNamespace
+
+    done = tmp_path / "done"
+    done.mkdir()
+    (done / "task-r.md").write_text("x", "utf-8")
+    pipeline = SimpleNamespace(
+        finalized=False, task_file=str(done / "task-r.md"), task=SimpleNamespace(id="task-r")
+    )
+
+    assert Orchestrator._already_finalized(None, pipeline) is False  # type: ignore[arg-type]
+    (done / "task-r.summary.md").write_text("summary", "utf-8")
+    assert Orchestrator._already_finalized(None, pipeline) is True  # type: ignore[arg-type]
+    pending = SimpleNamespace(
+        finalized=True, task_file=str(tmp_path / "task-p.md"), task=SimpleNamespace(id="task-p")
+    )
+    assert Orchestrator._already_finalized(None, pending) is True  # type: ignore[arg-type]
+
+
+def test_a_late_finalize_that_fails_still_files_the_task(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The late finalize runs outside the engine's error routing; a filesystem error in it must not
+    # strand the task non-terminal — the terminal is recorded and the plain move files the task.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "analysis.md").write_text("Analyse {task_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(
+        _NO_GIT_FLOW.format(
+            output_policy="code_change", publishing="none", policy="none", analysis_extra=""
+        ),
+        "utf-8",
+    )
+    orch, store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(outputs={"analysis": ("done", None)}),
+        check_verdicts=[0],
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    def boom(_p: object, _inputs: object) -> str | None:
+        raise OSError("disk full")
+
+    orch._engine_finalize = boom  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-oserr"))
+
+    assert result.final_status is Status.DONE, result
+    assert (tmp_path / "done" / "task-oserr.md").exists()
+    row = store.get_task("task-oserr")
+    assert row is not None and row.status is Status.DONE

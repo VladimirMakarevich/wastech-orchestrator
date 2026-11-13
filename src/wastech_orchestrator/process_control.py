@@ -450,7 +450,8 @@ def running_daemon_pid(
     """The PID of the live process recorded in ``path``, or ``None``.
 
     ``path`` is any self-managed PID file written by :func:`write_pid_file` — the watch daemon's
-    (:func:`pid_file_path`) or a ``run`` executor's (:func:`runner_file_path`).
+    (:func:`pid_file_path`) or a ``run`` / ``rerun`` / single-pass ``watch`` executor's
+    (:func:`runner_file_path`).
 
     Where the platform can signal an unrelated PID (POSIX; see :func:`_can_signal`), this combines
     :func:`read_pid_record` with :func:`is_running`'s start-time recycling guard: a recorded PID

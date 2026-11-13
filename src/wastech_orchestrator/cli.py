@@ -1395,9 +1395,9 @@ def _executor_owner(config: OrchestratorConfig) -> str | None:
     """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
 
     Every command that drives the pipeline or git in the shared clone needs the slot idle, and two
-    processes can hold it. The advice differs: the daemon is stoppable, while a ``run`` is not — it
-    installs no stop wiring, so the only honest instruction is to wait for it or interrupt it where
-    it runs.
+    kinds of process can hold it. The advice differs: the daemon is stoppable, while a ``run``,
+    ``rerun`` or single-pass ``watch`` is not — none installs stop wiring, so the only honest
+    instruction is to wait for it or interrupt it where it runs.
 
     Verb-free because the sentence is needed in two moods: a refusal (`<verb>: <owner>`) from a
     command that would mutate the clone, and a note (`<verb>: note: <owner>`) beside a plan that
@@ -1405,17 +1405,53 @@ def _executor_owner(config: OrchestratorConfig) -> str | None:
     an operator wants before deciding whether to stop the daemon at all — but it says who owns the
     clone, so the plan is not read as executable right now.
     """
-    root = worc_home_for(config)
-    daemon = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    daemon = _daemon_owner_note(config)
     if daemon is not None:
-        return (
-            f"the watch daemon is running (pid {daemon}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
-    runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
+        return daemon
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
     if runner is not None:
         return _runner_owner_note(runner)
     return None
+
+
+def _daemon_owner_note(config: OrchestratorConfig) -> str | None:
+    """The owner sentence for a live watch daemon in this worc home, or ``None`` if none."""
+    daemon = process_control.running_daemon_pid(
+        process_control.pid_file_path(worc_home_for(config))
+    )
+    if daemon is None:
+        return None
+    return (
+        f"the watch daemon is running (pid {daemon}); stop it first with "
+        "'wastech-orchestrator stop'"
+    )
+
+
+def _claim_runner_marker(config: OrchestratorConfig, verb: str) -> Path | None:
+    """Claim the non-daemon executor slot for ``verb``; the marker's path, or ``None`` if refused.
+
+    Two steps, and the second is what makes a race between the two kinds of executor safe. The
+    exclusive create decides a race between two holders of ``orchestrator.run`` in the kernel. A
+    daemon claims a different file, so after winning its own claim each side re-reads the other's
+    marker — the daemon in ``cmd_watch``, this process here — and a side that finds the other held
+    releases what it just claimed and refuses. Whatever the interleaving, the later of the two
+    re-reads sees the earlier claim, so at least one side refuses (both may; neither runs alone
+    beside the other). Every refusal names the holder, and the caller has not touched the clone.
+    """
+    runner_path = process_control.runner_file_path(worc_home_for(config))
+    try:
+        process_control.write_pid_file(runner_path, exclusive=True)
+    except process_control.ExecutorBusyError as busy:
+        print(f"{verb}: {_runner_owner_note(busy.pid)}")
+        return None
+    daemon = _daemon_owner_note(config)
+    if daemon is not None:
+        runner_path.unlink(missing_ok=True)
+        print(f"{verb}: {daemon}")
+        return None
+    return runner_path
 
 
 def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
@@ -2081,16 +2117,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # `top` need it to tell "executing now" from "parked at a checkpoint", and every command that
     # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
     # crash would refuse those commands forever.
-    runner_path = process_control.runner_file_path(worc_home_for(config))
-    try:
-        # An exclusive claim, not a recording: the owner check above is separated from this line by
-        # the engine build and the dependency scan, and two `run`s that both saw the slot free in
-        # that window would both proceed — the loser's marker overwritten, after which `stop`
-        # addresses the wrong process. The check stays for the better message in the common case;
-        # the kernel decides the race.
-        process_control.write_pid_file(runner_path, exclusive=True)
-    except process_control.ExecutorBusyError as busy:
-        print(f"run: {_runner_owner_note(busy.pid)}")
+    #
+    # An exclusive claim, not a recording: the owner check above is separated from this line by
+    # the engine build and the dependency scan, and two `run`s that both saw the slot free in that
+    # window would both proceed — the loser's marker overwritten, after which `stop` addresses the
+    # wrong process. The check stays for the better message in the common case; the claim decides
+    # the race.
+    runner_path = _claim_runner_marker(config, "run")
+    if runner_path is None:
         return 1
     try:
         result = orchestrator.run_task(args.task_file)
@@ -2329,11 +2363,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     # `top` read its task as `parked (no daemon)` — the label external monitoring took for a
     # finished run while the node was still working. Exclusive, so a concurrent `run`/`rerun` that
     # raced past the owner check above is refused here; reaped in `finally`.
-    runner_path = process_control.runner_file_path(worc_home_for(config))
-    try:
-        process_control.write_pid_file(runner_path, exclusive=True)
-    except process_control.ExecutorBusyError as busy:
-        print(f"rerun: {_runner_owner_note(busy.pid)}")
+    runner_path = _claim_runner_marker(config, "rerun")
+    if runner_path is None:
         return 1
     try:
         result, label = _drive_rerun(orchestrator, args, plan, reset_fix_budget=resolved_reset)
@@ -3949,13 +3980,10 @@ def cmd_watch(args: argparse.Namespace) -> int:
             heartbeat_seconds=args.heartbeat_seconds,
         )
         notes = WatchNotes()
-        runner_path = process_control.runner_file_path(worc_home_for(config))
-        try:
-            # An exclusive claim, as in `run`: the owner check above is separated from here by the
-            # engine build, and the kernel decides a race inside that window.
-            process_control.write_pid_file(runner_path, exclusive=True)
-        except process_control.ExecutorBusyError as busy:
-            print(f"watch: {_runner_owner_note(busy.pid)}")
+        # An exclusive claim, as in `run`: the owner check above is separated from here by the
+        # engine build, and the claim decides a race inside that window.
+        runner_path = _claim_runner_marker(config, "watch")
+        if runner_path is None:
             return 1
         try:
             single_pass = watch_loop(
@@ -4023,6 +4051,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 process_control.write_pid_file(pid_path, exclusive=True)
             except process_control.ExecutorBusyError as busy:
                 print(_watcher_busy_note(busy.pid, pid_path))
+                return 1
+            # A `run`, `rerun` or single-pass `watch` claims a different file, so the exclusive
+            # create above cannot see it. Re-read its marker now that ours is held: whichever of the
+            # two re-reads comes later sees the other's claim (see `_claim_runner_marker`). Release
+            # ours before refusing — `claimed` is still False, so the cleanup below stays out of the
+            # way and touches none of the other executor's files.
+            racing_runner = process_control.running_daemon_pid(
+                process_control.runner_file_path(worc_home_for(config))
+            )
+            if racing_runner is not None:
+                pid_path.unlink(missing_ok=True)
+                print(f"watch: {_runner_owner_note(racing_runner)}")
                 return 1
             claimed = True
             # Lead our own process group (POSIX, best-effort) so `stop --force-full` can group-kill

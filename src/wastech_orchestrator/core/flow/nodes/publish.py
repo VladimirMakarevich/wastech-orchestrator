@@ -12,11 +12,15 @@ PR needs no special staging: the after-stage output guard already confined the w
 report directory, so the existing scoped staging commits only those docs.
 ``private_control_workspace_report`` stores the report under the gitignored ``.worc/``
 control workspace and touches git not at all — it fails closed if that report would be git-trackable
-(so it can never enter staging/a commit/a PR), leaving the target repo byte-for-byte. ``none`` /
-``local_artifact`` write no git either (the deliverable is the in-workspace artifact). Task finalize
-and auto-merge stay orchestrator-level: the PR path calls the finalize hook here, because the task
-file has to move before the audit commit records it; the no-git policies have no commit to order
-against, so the orchestrator finalizes them once the flow has ended (``_finish_engine_run``).
+(so it can never enter staging/a commit/a PR); the report itself never enters the target repo's
+tracked tree. ``none`` / ``local_artifact`` write no git either (the deliverable is the in-workspace
+artifact). Task finalize and auto-merge stay orchestrator-level: the PR path calls the finalize hook
+here, because the task file has to move before the audit commit records it; the no-git policies
+have no commit to order against, so the orchestrator finalizes them after terminal cleanup
+(``_finish_engine_run`` → ``_go_terminal``). That finalize still touches no git, but it does what
+every successful task does in the operator's lifecycle tree: it moves the task file into
+``tasks/done/`` and writes ``<id>.summary.md`` beside it — uncommitted, and gitignored unless the
+operator chose to track ``tasks/``.
 """
 
 from __future__ import annotations
