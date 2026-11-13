@@ -10,7 +10,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 - **`dev`** — the working branch. Cut every `feat/…`, `fix/…`, `chore/…` branch off `dev` and merge it back into `dev` (squash is fine, and preferred). It carries the code plus `docs/backlog/` (the task queue work is implemented from) and nothing else under `docs/`. Never push to `dev` directly — land changes through a PR, merged only after checks pass.
 - **`main`** — integration. It receives `dev` through merge commits. Its tree has the same shape as `dev`'s: no derived documentation, no site machinery. Never commit code directly on `main`.
-- **`release`** — published stable versions. `main → release` by merge commit, then `git tag vX.Y.Z` here; the package release publishes from this branch.
+- **`release`** — published stable versions. `main → release` by merge commit, then `git tag vX.Y.Z` here; the package release publishes from this branch. After every tag, `release` is merged back into `main` and `main` into `dev`, so the tag is reachable from every code branch (see "Cut a release").
 - **`site`** — the documentation and the published site. It receives `main` through merge commits and is the **only** branch that carries the derived `docs/` tree, `mkdocs.yml`, `tools/stage_site_docs.py`, and `.github/workflows/site.yml`. Documentation is reconstructed by reverse engineering from the diff arriving from `main`, as its own task: branch `docs/<slug>` off `site`, PR back into `site`. Every push to `site` republishes the site.
 
 ### The one hard rule
@@ -31,8 +31,8 @@ Every legal transition, and the two illegal ones. The mechanism column is the pa
 | `dev` → `main` | **merge commit**, never squash/rebase | Advances the merge base. A squash leaves `dev` quietly behind `main` and every later merge re-proposes the same content. |
 | `main` → `release` | merge commit | Ordinary — both branches are code-only. |
 | `hotfix/…` → `release` | squash or merge (PR) | Published-version fix; tag afterwards. |
-| `release` → `main` | merge commit | How a hotfix gets back into integration. |
-| `main` → `dev` | merge (PR) | Allowed. Rarely needed, never harmful. |
+| `release` → `main` | merge commit | After **every** tag, so the tag becomes reachable from `main` (and, through `main → dev`, from `dev`); also how a hotfix gets back into integration. |
+| `main` → `dev` | merge (PR) | Allowed and never harmful. Needed after every release back-merge, so `dev` reaches the new tag. |
 | `main` → `site` | **merge commit**, never squash/rebase | Advances the merge base past the seal. A squash re-proposes deleting all of `docs/` on every later merge. |
 | `docs/…` → `site` | squash or merge (PR) | The documentation refresh is ordinary work on `site`; it never touches the code branches. |
 | `site` → anywhere | **FORBIDDEN** — use `git cherry-pick` | Copies the documentation onto a branch that must not carry it. |
@@ -112,7 +112,17 @@ git merge --no-ff --no-edit main
 git push origin release                    # first: the branch
 git tag vX.Y.Z                             # aN / bN / rcN suffix ⇒ GitHub pre-release
 git push origin vX.Y.Z                     # then: the tag
+# then make the tag reachable from main and dev — merge commits both, never squash/rebase.
+# Merge each PR by its URL: a bare `gh pr merge` picks the PR whose head is the CURRENT branch
+# (`release`), so the second merge would hit the first, already-merged PR and `dev` would never
+# reach the tag.
+url=$(gh pr create --base main --head release --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from main")
+gh pr merge "$url" --merge
+url=$(gh pr create --base dev --head main --title "Back-merge vX.Y.Z" --body "Make vX.Y.Z reachable from dev")
+gh pr merge "$url" --merge
 ```
+
+**Why the back-merge is part of the release.** The package version comes from hatch-vcs, which reads the nearest tag **reachable from the commit being built**. A tag that sits only on `release` is invisible from `dev` and `main`, so a build from either reports a dev version of the last tag that happened to be reachable — once, `0.10.3a2.dev229` for a tree that already carried everything `v0.14.0a1` shipped — and any consumer that gates on worc's version refuses it. Merging `release` back after each tag keeps every code-branch build at or above the newest release it contains. Both merges are transitions the model already allows, `release` carries nothing `main` or `dev` must not have, and `site` is untouched, so the seal is unaffected. The alternatives were rejected: a tag names one commit, so the same tag cannot also be put on `main`; and a hatch-vcs fallback that reads the newest tag from elsewhere would report a version the built commit does not contain.
 
 **Hotfix a published version.**
 
@@ -122,8 +132,10 @@ git checkout -b hotfix/<slug>
 # … fix + the gate … then PR into release and tag:
 gh pr create --base release && gh pr merge --squash --delete-branch
 git checkout release && git pull && git tag vX.Y.Z+1 && git push origin vX.Y.Z+1
-gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>"
-gh pr merge --merge                        # merge commit, as for dev → main
+url=$(gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>")
+gh pr merge "$url" --merge                 # merge commit, as for dev → main; by URL, see "Cut a release"
+url=$(gh pr create --base dev --head main --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>")
+gh pr merge "$url" --merge                 # the back-merge every tag gets
 ```
 
 **Port a fix out of `site` into `dev`** — cherry-pick, never a merge.
