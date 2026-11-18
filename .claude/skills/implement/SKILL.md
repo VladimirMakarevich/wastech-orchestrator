@@ -14,3 +14,5 @@ Strictly follow the project rules outlined in the documentation. In particular, 
 - [git-workflow](../../../.agents/rules/git-workflow.md) 
 - [security](../../../.agents/rules/security.md) 
 - [testing](../../../.agents/rules/testing.md)
+
+**Once you’ve finished the implementation, invoke the `/code-review` skill using subagent.**
