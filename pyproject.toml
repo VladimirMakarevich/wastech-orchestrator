@@ -52,7 +52,9 @@ worc = "wastech_orchestrator.cli:main"
 [tool.hatch.version]
 # The version comes from the Git tag (e.g. tag `v0.1.1a1` -> version `0.1.1a1`). Between tags,
 # builds get a dev version like `0.1.1a2.dev3+g<sha>`. Requires full history at build time
-# (CI: actions/checkout with fetch-depth: 0). See .agents/rules/git-workflow.md.
+# (CI: actions/checkout with fetch-depth: 0). Tags are cut on `release` and merged back into
+# `main` and `dev` after every release, so a build from those branches sees the newest tag it
+# contains. See .agents/rules/git-workflow.md ("Cut a release").
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]

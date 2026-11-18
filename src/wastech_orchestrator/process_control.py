@@ -155,11 +155,12 @@ def pid_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
 
 
 def runner_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
-    """The canonical ``run``-executor marker (``<root>/orchestrator.run``).
+    """The canonical non-daemon executor marker (``<root>/orchestrator.run``).
 
-    A self-managed liveness file beside the daemon's ``orchestrator.pid``, and deliberately **not**
-    the same file. ``run`` installs no stop wiring — no ``SIGTERM`` handler, no stop-file poll — so
-    a ``stop`` that believed it could ask this process to finish would wait out its timeout and
+    Held by ``run``, ``rerun`` and a single-pass ``watch`` for exactly as long as they execute. A
+    self-managed liveness file beside the daemon's ``orchestrator.pid``, and deliberately **not**
+    the same file. None of those installs stop wiring — no ``SIGTERM`` handler, no stop-file poll —
+    so a ``stop`` that believed it could ask this process to finish would wait out its timeout and
     escalate to a kill on a process that was working correctly. Two files let every "is anything
     executing in this clone?" probe answer yes while the stop ladder keeps addressing only the
     process that can answer it.
@@ -449,7 +450,8 @@ def running_daemon_pid(
     """The PID of the live process recorded in ``path``, or ``None``.
 
     ``path`` is any self-managed PID file written by :func:`write_pid_file` — the watch daemon's
-    (:func:`pid_file_path`) or a ``run`` executor's (:func:`runner_file_path`).
+    (:func:`pid_file_path`) or a ``run`` / ``rerun`` / single-pass ``watch`` executor's
+    (:func:`runner_file_path`).
 
     Where the platform can signal an unrelated PID (POSIX; see :func:`_can_signal`), this combines
     :func:`read_pid_record` with :func:`is_running`'s start-time recycling guard: a recorded PID

@@ -53,7 +53,7 @@ flow:
       hitl: { allow_question: true, allow_approval: false }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -81,7 +81,7 @@ flow:
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -101,7 +101,7 @@ flow:
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -121,7 +121,7 @@ flow:
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -144,7 +144,7 @@ flow:
       max_rework_per_stage: 2
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # network_access: false
     - id: external_research
@@ -161,7 +161,7 @@ flow:
       when: { fact: config.external_research }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: true
@@ -182,7 +182,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # An organizing pass over evidence three passes already gathered: measured at xhigh, every one
       # of its repository reads was a re-read and it produced no new finding. `high` is the fit.
       # reasoning: high
@@ -202,7 +202,7 @@ flow:
       output_file: report.md
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -238,7 +238,7 @@ flow:
       max_rework_per_stage: 1
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: high
       # network_access: true
     - id: critical_review
@@ -258,7 +258,7 @@ flow:
       max_rework_per_stage: 3
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-5
+      # model: claude-opus-5-5
       # reasoning: xhigh
       # network_access: true
     - id: publish
