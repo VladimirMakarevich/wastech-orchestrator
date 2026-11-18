@@ -172,8 +172,8 @@ class ProviderAttempt:
     # What THIS attempt was launched with, resolved the way the adapter resolves it (a flow node's
     # override, else the provider's configured default). Per attempt because a cross-provider
     # fallback re-resolves against the substitute's own config: a stage that failed over from
-    # ``codex``/``gpt-5.5`` to ``claude`` did not run on ``gpt-5.5``, and one value for the stage
-    # would say it did. Defaulted so a row built without them (unit harnesses) stays valid.
+    # ``codex``/``gpt-6-sol`` to ``claude`` did not run on ``gpt-6-sol``, and one value for the
+    # stage would say it did. Defaulted so a row built without them (unit harnesses) stays valid.
     model: str | None = None
     reasoning: str | None = None
     # Whether THIS attempt was launched against a live session. Per attempt for the same reason the
@@ -726,7 +726,7 @@ class AgentRouter:
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
         provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
-        and ``session_id``. A model id is provider-specific (codex ``gpt-5.5`` is not a Claude
+        and ``session_id``. A model id is provider-specific (codex ``gpt-6-sol`` is not a Claude
         model), provider CLI flags in ``extra_args`` are not portable, and a durable session id
         belongs to one provider. Cleared values make the substitute re-resolve its own
         config/defaults while preserving portable context (prompt, paths, schema, permissions,

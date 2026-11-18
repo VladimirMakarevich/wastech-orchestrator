@@ -14,8 +14,8 @@ Descriptive documentation is expensive to keep near the code. It is reconstructe
 
 | Branch | Holds | Receives |
 | --- | --- | --- |
-| `dev` | sources of truth and live working state: the code, the rules, and `docs/backlog/` (the work queue) | `feat/…` (squash) |
-| `main` | the same tree as `dev` — integration only | `dev` (merge commit), `release` (merge commit) |
+| `dev` | sources of truth and live working state: the code, the rules, and `docs/backlog/` (the work queue) | `feat/…` (squash), `main` (merge, after each release back-merge) |
+| `main` | the same tree as `dev` — integration only | `dev` (merge commit), `release` (merge commit, after every tag) |
 | `release` | the same tree as `dev`; version tags are cut here | `main` (merge commit), `hotfix/…` |
 | `site` | everything `main` has, **plus** the derived `docs/` tree and the site machinery (`mkdocs.yml`, `tools/stage_site_docs.py`, the `site` workflow, the mdlint docs overlay) | `main` (merge commit), `docs/…` (PR) |
 
@@ -26,6 +26,10 @@ The split rule that produced this partition, and that decides any future file:
 Everything an agent needs in order to _do_ work stays on `dev`. Everything that only _describes_ the result — and can therefore be reconstructed from the code — lives on `site` alone. `docs/backlog/` is the one apparent exception and is not one: it is the queue that work is implemented from, an input rather than a description. Under `docs/`, the code branches keep `backlog/` and `research/` (the latter produced by a `deep_research` run) and nothing else — one mechanically checkable rule, which is what `branch-guard` enforces.
 
 Three things can never leave the code branches, whatever the split rule says: `README.md` (declared by `pyproject.toml`, so `pip install -e .` fails without it), the Markdown under `src/wastech_orchestrator/packaged/` (runtime assets — flows, role prompts, the shipped operator guide — not documentation), and `AGENTS.md` / `CLAUDE.md` / `.agents/rules/` / `.claude/skills/` (inputs that govern how agents work).
+
+## Why `release` merges back after every tag
+
+The package version is derived from git by hatch-vcs: the nearest tag reachable from the commit being built. Tags are cut on `release`, so without a way back they are unreachable from `dev` and `main`, and a build from either reports a stale dev version of whatever older tag happens to be reachable — a version older than the release the tree already contains. Merging `release → main → dev` after each tag (both are merge commits the model already permits) makes the tag reachable everywhere code is built. `release` holds only code, so the back-merge carries nothing a code branch must not have and never touches `site` or its seal.
 
 ## Why `site` and not `docs`
 

@@ -124,7 +124,7 @@ def test_stop_does_not_offer_to_continue_a_task_that_is_executing(
     note = cli._parked_slot_note(in_repo_config)
 
     assert note is not None
-    assert "rerun" not in note
+    assert "--continue" not in note
     assert "4242" in note
 
 
@@ -335,3 +335,190 @@ def test_a_rerun_is_a_live_executor_for_its_whole_duration(
     assert seen["during"] is True
     assert "parked" not in str(seen["label"])
     assert not marker.exists()
+
+
+# -- a single-pass `watch` is an executor for exactly as long as it runs ----------------------
+
+
+def _single_pass_env(monkeypatch: pytest.MonkeyPatch, config: OrchestratorConfig) -> None:
+    monkeypatch.setattr(cli, "load_config_for", lambda args: config)
+    monkeypatch.setattr(cli, "require_launch_environment", lambda *a, **k: None)
+    monkeypatch.setattr(cli.preflight, "require_git_control", lambda: None)
+
+
+def test_a_single_pass_watch_is_a_live_executor_for_its_whole_duration(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    # `watch --poll-seconds 0` wrote no marker, so the task it executed read `parked (no daemon)`
+    # for the whole pass — the label that sends an operator to `rerun --continue`.
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    seen: dict[str, object] = {}
+
+    def fake_watch_loop(*_a: object, **_k: object) -> list[PipelineResult]:
+        seen["during"] = marker.exists()
+        row = TaskRow(task_id="task-1", title="T", status=Status.RUNNING)
+        seen["label"] = cli._display_status(row, executor_alive=cli._executor_alive(in_repo_config))
+        return []
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "watch_loop", fake_watch_loop)
+
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 0
+
+    assert seen["during"] is True
+    assert seen["label"] == "running"
+    assert not marker.exists()  # reaped on exit
+    # Never the daemon's PID file: `stop` cannot ask a single pass to finish.
+    assert not process_control.pid_file_path(cli.worc_home_for(in_repo_config)).exists()
+
+
+def test_a_failing_single_pass_watch_still_reaps_its_marker(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig
+) -> None:
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+
+    def boom(*_a: object, **_k: object) -> list[PipelineResult]:
+        raise RuntimeError("provider exploded")
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "watch_loop", boom)
+
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        cli.main(["watch", "--poll-seconds", "0"])
+
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("holder", ["daemon", "runner"])
+def test_a_single_pass_watch_refuses_in_a_busy_clone(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+    holder: str,
+) -> None:
+    root = cli.worc_home_for(in_repo_config)
+    path = (
+        process_control.pid_file_path(root)
+        if holder == "daemon"
+        else process_control.runner_file_path(root)
+    )
+    process_control.write_pid_file(path, pid=4242)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    _single_pass_env(monkeypatch, in_repo_config)
+    started: list[int] = []
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: started.append(1))
+
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 1
+
+    assert started == []  # refused before any engine was built
+    out = capsys.readouterr().out
+    assert out.startswith("watch: ")
+    assert "4242" in out
+    assert path.exists()  # the holder's marker is left alone
+
+
+def test_a_single_pass_that_loses_the_race_refuses_instead_of_stealing_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The owner check passes, then another executor claims the marker during the engine build.
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    ran: list[int] = []
+
+    def build_and_lose(*_a: object, **_k: object) -> object:
+        process_control.write_pid_file(marker, pid=4242)
+        return object()
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    monkeypatch.setattr(cli, "build_orchestrator", build_and_lose)
+    monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: ran.append(1) or [])
+
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 1
+
+    assert ran == []
+    assert "4242" in capsys.readouterr().out
+    assert marker.exists()  # the winner's marker survives
+
+
+def test_a_daemon_refuses_to_start_while_a_single_pass_executes(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: dict[str, int] = {}
+
+    def single_pass_loop(*_a: object, **_k: object) -> list[PipelineResult]:
+        # While the single pass executes, a daemon started from another shell must refuse.
+        seen["daemon"] = cli.main(["watch", "--poll-seconds", "5"])
+        return []
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "watch_loop", single_pass_loop)
+
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 0
+
+    assert seen["daemon"] == 1
+    assert "single-pass 'watch'" in capsys.readouterr().out
+
+
+def test_a_single_pass_releases_its_claim_when_a_daemon_raced_in(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The two kinds of executor claim different files, so the exclusive create alone cannot decide
+    # between them. A daemon that claims its PID file after the single pass's owner check is seen by
+    # the re-read that follows the single pass's own claim.
+    root = cli.worc_home_for(in_repo_config)
+    runner = process_control.runner_file_path(root)
+    daemon_pid = process_control.pid_file_path(root)
+    ran: list[int] = []
+
+    def build_while_a_daemon_starts(*_a: object, **_k: object) -> object:
+        process_control.write_pid_file(daemon_pid, pid=4242)
+        return object()
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    monkeypatch.setattr(cli, "build_orchestrator", build_while_a_daemon_starts)
+    monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: ran.append(1) or [])
+
+    assert cli.main(["watch", "--poll-seconds", "0"]) == 1
+
+    assert ran == []
+    assert "watch daemon is running (pid 4242)" in capsys.readouterr().out
+    assert not runner.exists()  # our claim released
+    assert daemon_pid.exists()  # the daemon's left alone
+
+
+def test_a_daemon_releases_its_claim_when_a_run_raced_in(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The mirror case: a `run` claims the runner marker after the daemon's pre-flight check.
+    root = cli.worc_home_for(in_repo_config)
+    runner = process_control.runner_file_path(root)
+    daemon_pid = process_control.pid_file_path(root)
+    ran: list[int] = []
+
+    def build_while_a_run_starts(*_a: object, **_k: object) -> object:
+        process_control.write_pid_file(runner, pid=4242)
+        return object()
+
+    _single_pass_env(monkeypatch, in_repo_config)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    monkeypatch.setattr(cli, "build_orchestrator", build_while_a_run_starts)
+    monkeypatch.setattr(cli, "watch_loop", lambda *a, **k: ran.append(1) or [])
+
+    assert cli.main(["watch", "--poll-seconds", "5"]) == 1
+
+    assert ran == []
+    assert "4242" in capsys.readouterr().out
+    assert not daemon_pid.exists()  # our claim released
+    assert runner.exists()  # the run's left alone
